@@ -1,0 +1,24 @@
+name: Build & Publish Documentation
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.CUSTOM_GH_TOKEN }}
+      - run: npm ci
+      - run: npm run build
+      - run: npm i
+      - run: git config --global user.email "github-actions[bot]@users.noreply.github.com"
+      - run: git config --global user.name "github-actions[bot]"
+      - run: npm run docs
+        env:
+          GIT_USER: smashah
+          GIT_PASS: ${{ secrets.CUSTOM_GH_TOKEN }}
