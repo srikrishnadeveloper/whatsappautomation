@@ -23,11 +23,11 @@ import { useAuth } from '../context/AuthContext'
 import { API_BASE } from '../services/api'
 
 const navigation = [
-  { name: 'Connect WhatsApp', href: '/', icon: Smartphone },
   { name: 'Inbox', href: '/dashboard', icon: Inbox },
-  { name: 'AI Search', href: '/search', icon: Search },
   { name: 'Tasks', href: '/tasks', icon: CheckSquare },
+  { name: 'AI Search', href: '/search', icon: Search },
   { name: 'Summary', href: '/summary', icon: FileText },
+  { name: 'Connect WhatsApp', href: '/', icon: Smartphone },
   { name: 'Settings', href: '/settings', icon: Settings },
 ]
 

@@ -7,6 +7,7 @@
  */
 
 import { useEffect, useState, useCallback, useRef } from 'react'
+import { Link } from 'react-router-dom'
 import { 
   CheckCircle2, 
   AlertCircle,
@@ -17,7 +18,12 @@ import {
   Trash2,
   Smartphone,
   Sparkles,
-  LogOut
+  LogOut,
+  Inbox,
+  CheckSquare,
+  Search,
+  MessageSquare,
+  ArrowRight
 } from 'lucide-react'
 import { API_BASE } from '../services/api'
 
@@ -526,15 +532,145 @@ export default function Connect() {
     </div>
   )
 
+  // Quick Links Component
+  const QuickLinks = () => (
+    <div className="soft-card p-4 bg-[var(--bg-surface)]">
+      <h3 className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider mb-3">Quick Links</h3>
+      <div className="space-y-2">
+        <Link 
+          to="/dashboard" 
+          className="flex items-center gap-3 p-3 rounded-lg hover:bg-[var(--bg-surface-soft)] transition-colors group"
+        >
+          <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center">
+            <Inbox className="w-4 h-4 text-blue-500" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-[var(--text-primary)]">Inbox</p>
+            <p className="text-xs text-[var(--text-muted)]">View all messages</p>
+          </div>
+          <ArrowRight className="w-4 h-4 text-[var(--text-muted)] opacity-0 group-hover:opacity-100 transition-opacity" />
+        </Link>
+        <Link 
+          to="/tasks" 
+          className="flex items-center gap-3 p-3 rounded-lg hover:bg-[var(--bg-surface-soft)] transition-colors group"
+        >
+          <div className="w-8 h-8 rounded-lg bg-emerald-50 flex items-center justify-center">
+            <CheckSquare className="w-4 h-4 text-emerald-500" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-[var(--text-primary)]">Tasks</p>
+            <p className="text-xs text-[var(--text-muted)]">Manage your to-dos</p>
+          </div>
+          <ArrowRight className="w-4 h-4 text-[var(--text-muted)] opacity-0 group-hover:opacity-100 transition-opacity" />
+        </Link>
+        <Link 
+          to="/search" 
+          className="flex items-center gap-3 p-3 rounded-lg hover:bg-[var(--bg-surface-soft)] transition-colors group"
+        >
+          <div className="w-8 h-8 rounded-lg bg-purple-50 flex items-center justify-center">
+            <Search className="w-4 h-4 text-purple-500" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-[var(--text-primary)]">AI Search</p>
+            <p className="text-xs text-[var(--text-muted)]">Find anything with AI</p>
+          </div>
+          <ArrowRight className="w-4 h-4 text-[var(--text-muted)] opacity-0 group-hover:opacity-100 transition-opacity" />
+        </Link>
+      </div>
+    </div>
+  )
+
+  // Recent Messages Preview
+  const RecentMessages = () => {
+    const [recentMsgs, setRecentMsgs] = useState<any[]>([])
+    const [loadingMsgs, setLoadingMsgs] = useState(true)
+
+    useEffect(() => {
+      const fetchRecent = async () => {
+        try {
+          const res = await fetch(`${API_BASE}/messages?limit=5`)
+          const json = await res.json()
+          if (json.success) {
+            setRecentMsgs(json.data || [])
+          }
+        } catch (err) {
+          console.error('Failed to fetch recent messages:', err)
+        } finally {
+          setLoadingMsgs(false)
+        }
+      }
+      fetchRecent()
+    }, [state.status])
+
+    if (loadingMsgs) {
+      return (
+        <div className="soft-card p-4 bg-[var(--bg-surface)]">
+          <h3 className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider mb-3">Recent Messages</h3>
+          <div className="flex items-center justify-center py-6">
+            <Loader2 className="w-5 h-5 text-[var(--text-muted)] animate-spin" />
+          </div>
+        </div>
+      )
+    }
+
+    if (recentMsgs.length === 0) {
+      return (
+        <div className="soft-card p-4 bg-[var(--bg-surface)]">
+          <h3 className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider mb-3">Recent Messages</h3>
+          <div className="text-center py-6">
+            <MessageSquare className="w-8 h-8 text-[var(--text-muted)] mx-auto mb-2 opacity-50" />
+            <p className="text-sm text-[var(--text-muted)]">No messages yet</p>
+            <p className="text-xs text-[var(--text-muted)] mt-1">Connect WhatsApp to start</p>
+          </div>
+        </div>
+      )
+    }
+
+    return (
+      <div className="soft-card p-4 bg-[var(--bg-surface)]">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider">Recent Messages</h3>
+          <Link to="/dashboard" className="text-xs text-[var(--accent-primary)] hover:underline">View all</Link>
+        </div>
+        <div className="space-y-2">
+          {recentMsgs.slice(0, 4).map((msg, idx) => (
+            <div key={msg.id || idx} className="flex items-start gap-3 p-2 rounded-lg hover:bg-[var(--bg-surface-soft)] transition-colors">
+              <div className="w-8 h-8 rounded-full bg-[var(--bg-surface-soft)] flex items-center justify-center shrink-0">
+                <span className="text-xs font-medium text-[var(--text-secondary)]">
+                  {(msg.sender || 'U').charAt(0).toUpperCase()}
+                </span>
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-medium text-[var(--text-primary)] truncate">{msg.sender || 'Unknown'}</p>
+                  <span className="text-[10px] text-[var(--text-muted)] shrink-0">
+                    {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                  </span>
+                </div>
+                <p className="text-xs text-[var(--text-secondary)] truncate">{msg.content || 'No content'}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="h-full flex flex-col bg-[var(--bg-primary)]">
       {/* Desktop Layout - Two columns */}
       <div className="hidden lg:flex flex-1 gap-6 p-6 max-w-7xl mx-auto w-full">
-        {/* Left: Connection */}
-        <div className="w-[420px] shrink-0">
-          <div className="soft-card p-6 bg-[var(--bg-surface)] sticky top-6">
+        {/* Left: Connection + Quick Links + Recent Messages */}
+        <div className="w-[420px] shrink-0 space-y-4">
+          <div className="soft-card p-6 bg-[var(--bg-surface)]">
             <ConnectionContent />
           </div>
+          {state.status === 'connected' && (
+            <>
+              <QuickLinks />
+              <RecentMessages />
+            </>
+          )}
         </div>
         
         {/* Right: Activity Log - takes remaining space */}
