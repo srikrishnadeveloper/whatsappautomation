@@ -14,7 +14,8 @@ import {
   Moon,
   Sun,
   LogOut,
-  ChevronDown
+  ChevronDown,
+  Search
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import clsx from 'clsx'
@@ -24,6 +25,7 @@ import { API_BASE } from '../services/api'
 const navigation = [
   { name: 'Connect WhatsApp', href: '/', icon: Smartphone },
   { name: 'Inbox', href: '/dashboard', icon: Inbox },
+  { name: 'AI Search', href: '/search', icon: Search },
   { name: 'Tasks', href: '/tasks', icon: CheckSquare },
   { name: 'Summary', href: '/summary', icon: FileText },
   { name: 'Settings', href: '/settings', icon: Settings },
