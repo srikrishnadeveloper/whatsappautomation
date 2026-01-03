@@ -1,6 +1,6 @@
 /**
  * AI Search Page
- * Intelligent search across messages and conversations using AI
+ * Matches the existing UI design using CSS variables
  */
 
 import { useState, useCallback } from 'react'
@@ -16,8 +16,10 @@ import {
   AlertCircle,
   CheckCircle2,
   Users,
-  ListTodo
+  ListTodo,
+  RefreshCw
 } from 'lucide-react'
+import clsx from 'clsx'
 import { API_BASE } from '../services/api'
 
 interface SearchResult {
@@ -39,10 +41,10 @@ interface AISearchResponse {
 }
 
 const QUICK_SEARCHES = [
-  { icon: Calendar, label: 'Find all meetings', query: 'Find all meetings, calls, and appointments' },
-  { icon: ListTodo, label: 'Find all tasks', query: 'Find all tasks, to-do items, and deadlines' },
-  { icon: Users, label: 'Important conversations', query: 'Find important or urgent conversations' },
-  { icon: Clock, label: 'Recent reminders', query: 'Find all reminders and things I need to remember' },
+  { icon: Calendar, label: 'Meetings', query: 'Find all meetings, calls, and appointments' },
+  { icon: ListTodo, label: 'Tasks', query: 'Find all tasks, to-do items, and deadlines' },
+  { icon: Users, label: 'Important', query: 'Find important or urgent conversations' },
+  { icon: Clock, label: 'Reminders', query: 'Find all reminders and things I need to remember' },
 ]
 
 export default function SearchPage() {
@@ -60,6 +62,7 @@ export default function SearchPage() {
     setLoading(true)
     setError(null)
     setResponse(null)
+    setPersonResult(null)
 
     try {
       const res = await fetch(`${API_BASE}/search`, {
@@ -90,6 +93,7 @@ export default function SearchPage() {
 
     setLoading(true)
     setError(null)
+    setResponse(null)
     setPersonResult(null)
 
     try {
@@ -122,250 +126,304 @@ export default function SearchPage() {
     handleSearch(followUpQuery)
   }
 
+  const clearResults = () => {
+    setResponse(null)
+    setPersonResult(null)
+    setError(null)
+    setQuery('')
+    setPersonSearch('')
+  }
+
   const formatTimestamp = (ts: string) => {
     try {
       const date = new Date(ts)
-      return date.toLocaleString()
+      const now = new Date()
+      const diff = now.getTime() - date.getTime()
+      const hours = diff / (1000 * 60 * 60)
+      
+      if (hours < 24) {
+        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      } else if (hours < 48) {
+        return 'Yesterday'
+      } else {
+        return date.toLocaleDateString([], { month: 'short', day: 'numeric' })
+      }
     } catch {
       return ts
     }
   }
 
   return (
-    <div className="min-h-screen bg-[#191919] text-white p-6">
-      <div className="max-w-4xl mx-auto">
-        {/* Header */}
-        <div className="mb-8">
-          <div className="flex items-center gap-3 mb-2">
-            <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-pink-500 rounded-lg flex items-center justify-center">
-              <Sparkles className="w-5 h-5 text-white" />
+    <div className="h-full flex flex-col bg-[var(--bg-primary)]">
+      {/* Header */}
+      <div className="flex-none px-6 py-4 border-b border-[var(--border-subtle)]">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-[var(--accent-light)] flex items-center justify-center">
+              <Search className="w-4 h-4 text-[var(--accent-primary)]" />
             </div>
-            <h1 className="text-2xl font-bold">AI Search</h1>
+            <div>
+              <h1 className="text-lg font-semibold text-[var(--text-primary)]">Search</h1>
+              <p className="text-xs text-[var(--text-muted)]">Find messages, tasks & conversations</p>
+            </div>
           </div>
-          <p className="text-gray-400">Search through your messages using AI to find meetings, tasks, and conversations</p>
+          {(response || personResult) && (
+            <button
+              onClick={clearResults}
+              className="flex items-center gap-2 px-3 py-1.5 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface-soft)] rounded-lg transition-colors"
+            >
+              <RefreshCw className="w-4 h-4" />
+              Clear
+            </button>
+          )}
         </div>
+      </div>
 
-        {/* Main Search */}
-        <div className="bg-[#252525] rounded-xl p-6 mb-6">
-          <div className="flex gap-3 mb-4">
-            <div className="flex-1 relative">
-              <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto p-6">
+        <div className="max-w-3xl mx-auto space-y-6">
+          
+          {/* Main Search */}
+          <div className="bg-[var(--bg-surface)] rounded-xl border border-[var(--border-subtle)] p-4">
+            <div className="flex gap-3 mb-4">
+              <div className="flex-1 relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)]" />
+                <input
+                  type="text"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+                  placeholder="Ask anything... e.g., 'meetings with John' or 'tasks due this week'"
+                  className="w-full pl-10 pr-4 py-2.5 bg-[var(--bg-primary)] border border-[var(--border-subtle)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-primary)] focus:ring-1 focus:ring-[var(--accent-primary)] transition-all"
+                />
+              </div>
+              <button
+                onClick={() => handleSearch()}
+                disabled={loading || !query.trim()}
+                className={clsx(
+                  'px-4 py-2.5 rounded-lg font-medium text-sm flex items-center gap-2 transition-all',
+                  'bg-[var(--accent-primary)] text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed'
+                )}
+              >
+                {loading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Sparkles className="w-4 h-4" />
+                )}
+                Search
+              </button>
+            </div>
+
+            {/* Quick Searches */}
+            <div className="flex flex-wrap gap-2">
+              {QUICK_SEARCHES.map((qs, i) => (
+                <button
+                  key={i}
+                  onClick={() => handleQuickSearch(qs.query)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-primary)] border border-[var(--border-subtle)] rounded-full text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-surface-soft)] hover:border-[var(--accent-primary)] hover:text-[var(--accent-primary)] transition-all"
+                >
+                  <qs.icon className="w-3 h-3" />
+                  {qs.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Person Search */}
+          <div className="bg-[var(--bg-surface)] rounded-xl border border-[var(--border-subtle)] p-4">
+            <h3 className="text-sm font-medium text-[var(--text-primary)] mb-3 flex items-center gap-2">
+              <User className="w-4 h-4 text-[var(--text-muted)]" />
+              Search by Person
+            </h3>
+            <div className="flex gap-3">
               <input
                 type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-                placeholder="Ask anything... e.g., 'Do I have any meetings with John?' or 'What tasks are due this week?'"
-                className="w-full pl-12 pr-4 py-3 bg-[#1a1a1a] border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-purple-500 transition-colors"
+                value={personSearch}
+                onChange={(e) => setPersonSearch(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handlePersonSearch()}
+                placeholder="Enter person's name..."
+                className="flex-1 px-4 py-2.5 bg-[var(--bg-primary)] border border-[var(--border-subtle)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-primary)] focus:ring-1 focus:ring-[var(--accent-primary)] transition-all"
               />
-            </div>
-            <button
-              onClick={() => handleSearch()}
-              disabled={loading || !query.trim()}
-              className="px-6 py-3 bg-gradient-to-r from-purple-600 to-pink-600 rounded-lg font-medium flex items-center gap-2 hover:opacity-90 disabled:opacity-50 transition-all"
-            >
-              {loading ? (
-                <Loader2 className="w-5 h-5 animate-spin" />
-              ) : (
-                <Sparkles className="w-5 h-5" />
-              )}
-              Search
-            </button>
-          </div>
-
-          {/* Quick Searches */}
-          <div className="flex flex-wrap gap-2">
-            {QUICK_SEARCHES.map((qs, i) => (
               <button
-                key={i}
-                onClick={() => handleQuickSearch(qs.query)}
-                className="flex items-center gap-2 px-3 py-1.5 bg-[#1a1a1a] border border-gray-700 rounded-full text-sm text-gray-300 hover:bg-[#2a2a2a] hover:border-purple-500 transition-all"
+                onClick={handlePersonSearch}
+                disabled={loading || !personSearch.trim()}
+                className="px-4 py-2.5 bg-[var(--bg-surface-soft)] border border-[var(--border-subtle)] rounded-lg font-medium text-sm flex items-center gap-2 hover:bg-[var(--accent-light)] hover:border-[var(--accent-primary)] hover:text-[var(--accent-primary)] disabled:opacity-50 disabled:cursor-not-allowed transition-all text-[var(--text-secondary)]"
               >
-                <qs.icon className="w-4 h-4" />
-                {qs.label}
+                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                Find
               </button>
-            ))}
+            </div>
           </div>
-        </div>
 
-        {/* Person Search */}
-        <div className="bg-[#252525] rounded-xl p-6 mb-6">
-          <h3 className="text-lg font-semibold mb-3 flex items-center gap-2">
-            <User className="w-5 h-5 text-blue-400" />
-            Search by Person
-          </h3>
-          <div className="flex gap-3">
-            <input
-              type="text"
-              value={personSearch}
-              onChange={(e) => setPersonSearch(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handlePersonSearch()}
-              placeholder="Enter person's name..."
-              className="flex-1 px-4 py-3 bg-[#1a1a1a] border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 transition-colors"
-            />
-            <button
-              onClick={handlePersonSearch}
-              disabled={loading || !personSearch.trim()}
-              className="px-6 py-3 bg-blue-600 rounded-lg font-medium flex items-center gap-2 hover:bg-blue-700 disabled:opacity-50 transition-all"
-            >
-              {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Search className="w-5 h-5" />}
-              Find
-            </button>
-          </div>
-        </div>
+          {/* Error Display */}
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-center gap-3">
+              <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
+              <span className="text-red-700 text-sm">{error}</span>
+            </div>
+          )}
 
-        {/* Error Display */}
-        {error && (
-          <div className="bg-red-900/20 border border-red-500/50 rounded-xl p-4 mb-6 flex items-center gap-3">
-            <AlertCircle className="w-5 h-5 text-red-400" />
-            <span className="text-red-400">{error}</span>
-          </div>
-        )}
-
-        {/* Person Search Result */}
-        {personResult && (
-          <div className="bg-[#252525] rounded-xl p-6 mb-6">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-12 h-12 bg-blue-600 rounded-full flex items-center justify-center text-xl font-bold">
-                {personResult.person.charAt(0).toUpperCase()}
-              </div>
-              <div>
-                <h3 className="text-lg font-semibold">{personResult.person}</h3>
-                <p className="text-gray-400 text-sm">{personResult.messageCount} messages found</p>
+          {/* Loading State */}
+          {loading && (
+            <div className="flex items-center justify-center py-12">
+              <div className="flex items-center gap-3 text-[var(--text-muted)]">
+                <Loader2 className="w-5 h-5 animate-spin" />
+                <span className="text-sm">Searching with AI...</span>
               </div>
             </div>
-            
-            <div className="bg-[#1a1a1a] rounded-lg p-4 mb-4">
-              <h4 className="font-medium mb-2 flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-purple-400" />
-                AI Summary
-              </h4>
-              <p className="text-gray-300 whitespace-pre-line">{personResult.summary}</p>
-            </div>
+          )}
 
-            {personResult.messages && personResult.messages.length > 0 && (
-              <div>
-                <h4 className="font-medium mb-3">Recent Messages</h4>
-                <div className="space-y-2 max-h-64 overflow-y-auto">
-                  {personResult.messages.slice(0, 10).map((msg: any, i: number) => (
-                    <div key={i} className="bg-[#1a1a1a] rounded-lg p-3">
-                      <div className="flex items-center gap-2 text-sm text-gray-400 mb-1">
-                        <span className="font-medium text-white">{msg.sender}</span>
-                        <span>•</span>
-                        <span>{formatTimestamp(msg.timestamp)}</span>
-                      </div>
-                      <p className="text-gray-300 text-sm">{msg.content}</p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* AI Search Results */}
-        {response && (
-          <div className="space-y-6">
-            {/* AI Answer */}
-            <div className="bg-gradient-to-br from-purple-900/30 to-pink-900/30 border border-purple-500/30 rounded-xl p-6">
-              <div className="flex items-start gap-3 mb-4">
-                <div className="w-8 h-8 bg-gradient-to-br from-purple-500 to-pink-500 rounded-lg flex items-center justify-center flex-shrink-0">
-                  <Sparkles className="w-4 h-4 text-white" />
+          {/* Person Search Result */}
+          {personResult && !loading && (
+            <div className="bg-[var(--bg-surface)] rounded-xl border border-[var(--border-subtle)] overflow-hidden">
+              {/* Person Header */}
+              <div className="p-4 border-b border-[var(--border-subtle)] flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-[var(--accent-light)] flex items-center justify-center text-[var(--accent-primary)] font-semibold">
+                  {personResult.person.charAt(0).toUpperCase()}
                 </div>
                 <div>
-                  <h3 className="font-semibold mb-2">AI Answer</h3>
-                  <p className="text-gray-200 leading-relaxed">{response.answer}</p>
+                  <h3 className="font-medium text-[var(--text-primary)]">{personResult.person}</h3>
+                  <p className="text-xs text-[var(--text-muted)]">{personResult.messageCount} messages found</p>
                 </div>
               </div>
-
-              {/* Summary */}
-              {response.summary && (
-                <div className="bg-[#1a1a1a]/50 rounded-lg p-4 mt-4">
-                  <p className="text-sm text-gray-300">
-                    <CheckCircle2 className="w-4 h-4 inline-block mr-2 text-green-400" />
-                    {response.summary}
-                  </p>
+              
+              {/* AI Summary */}
+              <div className="p-4 bg-[var(--bg-surface-soft)] border-b border-[var(--border-subtle)]">
+                <div className="flex items-center gap-2 mb-2">
+                  <Sparkles className="w-4 h-4 text-[var(--accent-primary)]" />
+                  <span className="text-xs font-medium text-[var(--accent-primary)]">AI Summary</span>
                 </div>
-              )}
+                <p className="text-sm text-[var(--text-secondary)] leading-relaxed whitespace-pre-line">{personResult.summary}</p>
+              </div>
 
-              {/* Suggested Follow-ups */}
-              {response.suggestedFollowUps && response.suggestedFollowUps.length > 0 && (
-                <div className="mt-4">
-                  <p className="text-sm text-gray-400 mb-2">Suggested follow-up questions:</p>
-                  <div className="flex flex-wrap gap-2">
-                    {response.suggestedFollowUps.map((q, i) => (
-                      <button
-                        key={i}
-                        onClick={() => handleFollowUp(q)}
-                        className="flex items-center gap-1 px-3 py-1.5 bg-[#1a1a1a] border border-purple-500/50 rounded-full text-sm text-purple-300 hover:bg-purple-900/30 transition-all"
-                      >
-                        <ChevronRight className="w-3 h-3" />
-                        {q}
-                      </button>
+              {/* Messages */}
+              {personResult.messages && personResult.messages.length > 0 && (
+                <div className="p-4">
+                  <h4 className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider mb-3">Recent Messages</h4>
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {personResult.messages.slice(0, 10).map((msg: any, i: number) => (
+                      <div key={i} className="p-3 bg-[var(--bg-primary)] rounded-lg border border-[var(--border-subtle)]">
+                        <div className="flex items-center gap-2 text-xs text-[var(--text-muted)] mb-1">
+                          <span className="font-medium text-[var(--text-primary)]">{msg.sender}</span>
+                          <span>•</span>
+                          <span>{formatTimestamp(msg.timestamp)}</span>
+                        </div>
+                        <p className="text-sm text-[var(--text-secondary)]">{msg.content}</p>
+                      </div>
                     ))}
                   </div>
                 </div>
               )}
             </div>
+          )}
 
-            {/* Matching Messages */}
-            {response.results.length > 0 && (
-              <div className="bg-[#252525] rounded-xl p-6">
-                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                  <MessageSquare className="w-5 h-5 text-green-400" />
-                  Matching Messages ({response.results.length})
-                </h3>
-                <div className="space-y-3 max-h-[500px] overflow-y-auto">
-                  {response.results.map((result, i) => (
-                    <div 
-                      key={i} 
-                      className="bg-[#1a1a1a] rounded-lg p-4 border-l-4 border-purple-500 hover:bg-[#202020] transition-colors"
-                    >
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="flex items-center gap-2">
-                          <div className="w-8 h-8 bg-gray-700 rounded-full flex items-center justify-center text-sm font-medium">
-                            {result.sender.charAt(0).toUpperCase()}
-                          </div>
-                          <div>
-                            <span className="font-medium">{result.sender}</span>
-                            <span className="text-gray-500 text-sm ml-2">in {result.chatName}</span>
-                          </div>
-                        </div>
-                        <span className="text-xs text-gray-500">{formatTimestamp(result.timestamp)}</span>
-                      </div>
-                      <p className="text-gray-300 mb-2">{result.content}</p>
-                      <p className="text-xs text-purple-400">
-                        <Sparkles className="w-3 h-3 inline-block mr-1" />
-                        {result.matchReason}
-                      </p>
+          {/* AI Search Results */}
+          {response && !loading && (
+            <div className="space-y-4">
+              {/* AI Answer */}
+              <div className="bg-[var(--bg-surface)] rounded-xl border border-[var(--border-subtle)] overflow-hidden">
+                <div className="p-4 bg-[var(--accent-light)] border-b border-[var(--border-subtle)]">
+                  <div className="flex items-start gap-3">
+                    <div className="w-8 h-8 rounded-lg bg-[var(--accent-primary)] flex items-center justify-center flex-shrink-0">
+                      <Sparkles className="w-4 h-4 text-white" />
                     </div>
-                  ))}
+                    <div className="flex-1">
+                      <h3 className="text-sm font-medium text-[var(--accent-primary)] mb-1">AI Answer</h3>
+                      <p className="text-sm text-[var(--text-primary)] leading-relaxed">{response.answer}</p>
+                    </div>
+                  </div>
                 </div>
-              </div>
-            )}
 
-            {response.results.length === 0 && (
-              <div className="bg-[#252525] rounded-xl p-8 text-center">
-                <MessageSquare className="w-12 h-12 text-gray-600 mx-auto mb-3" />
-                <p className="text-gray-400">No matching messages found</p>
-              </div>
-            )}
-          </div>
-        )}
+                {/* Summary */}
+                {response.summary && (
+                  <div className="p-4 border-b border-[var(--border-subtle)]">
+                    <div className="flex items-start gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-green-500 flex-shrink-0 mt-0.5" />
+                      <p className="text-sm text-[var(--text-secondary)]">{response.summary}</p>
+                    </div>
+                  </div>
+                )}
 
-        {/* Empty State */}
-        {!loading && !response && !personResult && !error && (
-          <div className="text-center py-12">
-            <div className="w-20 h-20 bg-[#252525] rounded-2xl flex items-center justify-center mx-auto mb-4">
-              <Search className="w-10 h-10 text-gray-600" />
+                {/* Suggested Follow-ups */}
+                {response.suggestedFollowUps && response.suggestedFollowUps.length > 0 && (
+                  <div className="p-4">
+                    <p className="text-xs font-medium text-[var(--text-muted)] mb-2">Follow-up questions:</p>
+                    <div className="flex flex-wrap gap-2">
+                      {response.suggestedFollowUps.map((q, i) => (
+                        <button
+                          key={i}
+                          onClick={() => handleFollowUp(q)}
+                          className="flex items-center gap-1 px-3 py-1.5 bg-[var(--bg-primary)] border border-[var(--border-subtle)] rounded-full text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-surface-soft)] hover:border-[var(--accent-primary)] hover:text-[var(--accent-primary)] transition-all"
+                        >
+                          <ChevronRight className="w-3 h-3" />
+                          {q}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Matching Messages */}
+              {response.results.length > 0 && (
+                <div className="bg-[var(--bg-surface)] rounded-xl border border-[var(--border-subtle)] overflow-hidden">
+                  <div className="p-4 border-b border-[var(--border-subtle)]">
+                    <h3 className="text-sm font-medium text-[var(--text-primary)] flex items-center gap-2">
+                      <MessageSquare className="w-4 h-4 text-[var(--text-muted)]" />
+                      Matching Messages
+                      <span className="text-xs font-normal text-[var(--text-muted)] bg-[var(--bg-surface-soft)] px-2 py-0.5 rounded-full">
+                        {response.results.length}
+                      </span>
+                    </h3>
+                  </div>
+                  <div className="divide-y divide-[var(--border-subtle)] max-h-[400px] overflow-y-auto">
+                    {response.results.map((result, i) => (
+                      <div key={i} className="p-4 hover:bg-[var(--bg-surface-soft)] transition-colors">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <div className="w-7 h-7 rounded-full bg-[var(--bg-surface-soft)] border border-[var(--border-subtle)] flex items-center justify-center text-xs font-medium text-[var(--text-secondary)]">
+                              {result.sender.charAt(0).toUpperCase()}
+                            </div>
+                            <div>
+                              <span className="text-sm font-medium text-[var(--text-primary)]">{result.sender}</span>
+                              <span className="text-xs text-[var(--text-muted)] ml-2">in {result.chatName}</span>
+                            </div>
+                          </div>
+                          <span className="text-xs text-[var(--text-muted)] font-mono">{formatTimestamp(result.timestamp)}</span>
+                        </div>
+                        <p className="text-sm text-[var(--text-secondary)] mb-2">{result.content}</p>
+                        <p className="text-xs text-[var(--accent-primary)] flex items-center gap-1">
+                          <Sparkles className="w-3 h-3" />
+                          {result.matchReason}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {response.results.length === 0 && (
+                <div className="bg-[var(--bg-surface)] rounded-xl border border-[var(--border-subtle)] p-8 text-center">
+                  <MessageSquare className="w-10 h-10 text-[var(--text-muted)] mx-auto mb-2" />
+                  <p className="text-sm text-[var(--text-muted)]">No matching messages found</p>
+                </div>
+              )}
             </div>
-            <h3 className="text-xl font-semibold mb-2">Search your messages</h3>
-            <p className="text-gray-400 max-w-md mx-auto">
-              Use AI to find meetings, tasks, conversations, and more. 
-              Try asking "Do I have any meetings this week?" or "What did John say about the project?"
-            </p>
-          </div>
-        )}
+          )}
+
+          {/* Empty State */}
+          {!loading && !response && !personResult && !error && (
+            <div className="text-center py-16">
+              <div className="w-16 h-16 bg-[var(--bg-surface)] rounded-2xl flex items-center justify-center mx-auto mb-4 border border-[var(--border-subtle)]">
+                <Search className="w-8 h-8 text-[var(--text-muted)]" />
+              </div>
+              <h3 className="text-base font-medium text-[var(--text-primary)] mb-1">Search your messages</h3>
+              <p className="text-sm text-[var(--text-muted)] max-w-sm mx-auto">
+                Use AI to find meetings, tasks, and conversations. Try the quick search buttons above!
+              </p>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
