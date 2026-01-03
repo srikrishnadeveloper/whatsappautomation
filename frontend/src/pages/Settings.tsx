@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { 
   RefreshCw,
   Moon,
   Sun,
-  Trash2
+  Trash2,
+  Loader2
 } from 'lucide-react'
 import clsx from 'clsx'
 import { API_BASE } from '../services/api'
@@ -16,6 +17,11 @@ interface HealthStatus {
     gemini: boolean
     whatsapp: string
   }
+}
+
+interface WhatsAppState {
+  status: string
+  user: { name: string; phone: string } | null
 }
 
 function SettingToggle({ 
@@ -53,8 +59,10 @@ function SettingToggle({
 
 export default function Settings() {
   const [health, setHealth] = useState<HealthStatus | null>(null)
+  const [whatsappState, setWhatsappState] = useState<WhatsAppState | null>(null)
   const [loading, setLoading] = useState(true)
   const [darkMode, setDarkMode] = useState(false)
+  const [clearing, setClearing] = useState(false)
   const [settings, setSettings] = useState({
     aiEnabled: true,
     autoStart: true,
@@ -68,7 +76,6 @@ export default function Settings() {
     const isDark = localStorage.getItem('darkMode') === 'true'
     setDarkMode(isDark)
     
-    // Load settings from localStorage
     const savedSettings = localStorage.getItem('appSettings')
     if (savedSettings) {
       setSettings(JSON.parse(savedSettings))
@@ -87,7 +94,7 @@ export default function Settings() {
     document.documentElement.classList.toggle('dark', newMode)
   }
 
-  const fetchHealth = async () => {
+  const fetchHealth = useCallback(async () => {
     setLoading(true)
     try {
       const res = await fetch(`${API_BASE}/health`)
@@ -98,11 +105,29 @@ export default function Settings() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
+
+  // Fetch WhatsApp status separately for accurate connection status
+  const fetchWhatsAppStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/whatsapp/status`)
+      const json = await res.json()
+      if (json.success) {
+        setWhatsappState(json.data)
+      }
+    } catch (err) {
+      console.error('Failed to fetch WhatsApp status:', err)
+    }
+  }, [])
 
   useEffect(() => {
     fetchHealth()
-  }, [])
+    fetchWhatsAppStatus()
+    
+    // Poll WhatsApp status every 5 seconds
+    const interval = setInterval(fetchWhatsAppStatus, 5000)
+    return () => clearInterval(interval)
+  }, [fetchHealth, fetchWhatsAppStatus])
 
   const testClassification = async () => {
     setTesting(true)
@@ -132,16 +157,31 @@ export default function Settings() {
   const clearAllData = async () => {
     if (!confirm('Are you sure you want to clear all messages and tasks? This cannot be undone.')) return
     
+    setClearing(true)
     try {
+      // Clear logs
       await fetch(`${API_BASE}/logs`, { method: 'DELETE' })
-      alert('Data cleared successfully')
+      
+      // Clear messages
+      await fetch(`${API_BASE}/messages/clear`, { method: 'DELETE' })
+      
+      // Clear action items
+      await fetch(`${API_BASE}/actions/clear`, { method: 'DELETE' })
+      
+      alert('All data cleared successfully!')
     } catch (err) {
-      alert('Failed to clear data')
+      console.error('Failed to clear data:', err)
+      alert('Failed to clear some data. Check console for details.')
+    } finally {
+      setClearing(false)
     }
   }
 
+  // Use whatsappState for accurate connection status
+  const isWhatsAppConnected = whatsappState?.status === 'connected'
+
   return (
-    <div className="max-w-xl mx-auto overflow-hidden pb-10">
+    <div className="max-w-xl mx-auto overflow-hidden pb-10 px-4">
       {/* Header */}
       <h1 className="text-xl font-semibold text-[var(--text-primary)] mb-1">Settings</h1>
       <p className="text-sm text-[var(--text-muted)] mb-6 sm:mb-8">Manage your preferences</p>
@@ -151,7 +191,7 @@ export default function Settings() {
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wide">Status</h2>
           <button 
-            onClick={fetchHealth}
+            onClick={() => { fetchHealth(); fetchWhatsAppStatus(); }}
             className="p-1 rounded hover:bg-[var(--bg-hover)]"
           >
             <RefreshCw className={clsx('w-3.5 h-3.5 text-[var(--text-muted)]', loading && 'animate-spin')} />
@@ -162,12 +202,15 @@ export default function Settings() {
           <div className="flex items-center gap-2">
             <span className={clsx(
               'w-2 h-2 rounded-full',
-              health?.services.whatsapp === 'connected' ? 'bg-green-500' : 'bg-gray-400'
+              isWhatsAppConnected ? 'bg-green-500' : 'bg-gray-400'
             )} />
             <span className="text-[var(--text-primary)]">WhatsApp</span>
             <span className="text-[var(--text-muted)]">
-              {health?.services.whatsapp === 'connected' ? 'Connected' : 'Disconnected'}
+              {isWhatsAppConnected ? 'Connected' : 'Disconnected'}
             </span>
+            {whatsappState?.user && (
+              <span className="text-[var(--text-muted)] text-xs">({whatsappState.user.phone})</span>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <span className={clsx(
@@ -289,10 +332,11 @@ export default function Settings() {
           </div>
           <button
             onClick={clearAllData}
+            disabled={clearing}
             className="text-sm text-red-500 hover:text-red-600 flex items-center gap-1"
           >
-            <Trash2 className="w-3.5 h-3.5" />
-            Clear
+            {clearing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+            {clearing ? 'Clearing...' : 'Clear'}
           </button>
         </div>
       </section>

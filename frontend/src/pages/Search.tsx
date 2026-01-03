@@ -156,15 +156,15 @@ export default function SearchPage() {
   return (
     <div className="h-full flex flex-col bg-[var(--bg-primary)]">
       {/* Header */}
-      <div className="flex-none px-6 py-4 border-b border-[var(--border-subtle)]">
+      <div className="flex-none px-4 sm:px-6 py-3 sm:py-4 border-b border-[var(--border-subtle)]">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-[var(--accent-light)] flex items-center justify-center">
-              <Search className="w-4 h-4 text-[var(--accent-primary)]" />
+          <div className="flex items-center gap-2 sm:gap-3">
+            <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-[var(--accent-light)] flex items-center justify-center">
+              <Search className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-[var(--accent-primary)]" />
             </div>
             <div>
-              <h1 className="text-lg font-semibold text-[var(--text-primary)]">Search</h1>
-              <p className="text-xs text-[var(--text-muted)]">Find messages, tasks & conversations</p>
+              <h1 className="text-base sm:text-lg font-semibold text-[var(--text-primary)]">Search</h1>
+              <p className="text-[10px] sm:text-xs text-[var(--text-muted)] hidden sm:block">Find messages, tasks & conversations</p>
             </div>
           </div>
           {(response || personResult) && (
@@ -180,12 +180,12 @@ export default function SearchPage() {
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-6">
-        <div className="max-w-3xl mx-auto space-y-6">
+      <div className="flex-1 overflow-y-auto p-3 sm:p-6">
+        <div className="max-w-3xl mx-auto space-y-4 sm:space-y-6">
           
           {/* Main Search */}
-          <div className="bg-[var(--bg-surface)] rounded-xl border border-[var(--border-subtle)] p-4">
-            <div className="flex gap-3 mb-4">
+          <div className="bg-[var(--bg-surface)] rounded-xl border border-[var(--border-subtle)] p-3 sm:p-4">
+            <div className="flex flex-col sm:flex-row gap-2 sm:gap-3 mb-3 sm:mb-4">
               <div className="flex-1 relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)]" />
                 <input
@@ -193,7 +193,7 @@ export default function SearchPage() {
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-                  placeholder="Ask anything... e.g., 'meetings with John' or 'tasks due this week'"
+                  placeholder="Ask anything..."
                   className="w-full pl-10 pr-4 py-2.5 bg-[var(--bg-primary)] border border-[var(--border-subtle)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-primary)] focus:ring-1 focus:ring-[var(--accent-primary)] transition-all"
                 />
               </div>
@@ -201,7 +201,7 @@ export default function SearchPage() {
                 onClick={() => handleSearch()}
                 disabled={loading || !query.trim()}
                 className={clsx(
-                  'px-4 py-2.5 rounded-lg font-medium text-sm flex items-center gap-2 transition-all',
+                  'w-full sm:w-auto px-4 py-2.5 rounded-lg font-medium text-sm flex items-center justify-center gap-2 transition-all',
                   'bg-[var(--accent-primary)] text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed'
                 )}
               >
@@ -210,17 +210,17 @@ export default function SearchPage() {
                 ) : (
                   <Sparkles className="w-4 h-4" />
                 )}
-                Search
+                <span className="sm:inline">Search</span>
               </button>
             </div>
 
             {/* Quick Searches */}
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap gap-1.5 sm:gap-2">
               {QUICK_SEARCHES.map((qs, i) => (
                 <button
                   key={i}
                   onClick={() => handleQuickSearch(qs.query)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-primary)] border border-[var(--border-subtle)] rounded-full text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-surface-soft)] hover:border-[var(--accent-primary)] hover:text-[var(--accent-primary)] transition-all"
+                  className="flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1 sm:py-1.5 bg-[var(--bg-primary)] border border-[var(--border-subtle)] rounded-full text-[10px] sm:text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-surface-soft)] hover:border-[var(--accent-primary)] hover:text-[var(--accent-primary)] transition-all"
                 >
                   <qs.icon className="w-3 h-3" />
                   {qs.label}
@@ -230,24 +230,24 @@ export default function SearchPage() {
           </div>
 
           {/* Person Search */}
-          <div className="bg-[var(--bg-surface)] rounded-xl border border-[var(--border-subtle)] p-4">
-            <h3 className="text-sm font-medium text-[var(--text-primary)] mb-3 flex items-center gap-2">
-              <User className="w-4 h-4 text-[var(--text-muted)]" />
+          <div className="bg-[var(--bg-surface)] rounded-xl border border-[var(--border-subtle)] p-3 sm:p-4">
+            <h3 className="text-xs sm:text-sm font-medium text-[var(--text-primary)] mb-2 sm:mb-3 flex items-center gap-2">
+              <User className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-[var(--text-muted)]" />
               Search by Person
             </h3>
-            <div className="flex gap-3">
+            <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
               <input
                 type="text"
                 value={personSearch}
                 onChange={(e) => setPersonSearch(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handlePersonSearch()}
                 placeholder="Enter person's name..."
-                className="flex-1 px-4 py-2.5 bg-[var(--bg-primary)] border border-[var(--border-subtle)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-primary)] focus:ring-1 focus:ring-[var(--accent-primary)] transition-all"
+                className="flex-1 px-3 sm:px-4 py-2 sm:py-2.5 bg-[var(--bg-primary)] border border-[var(--border-subtle)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-primary)] focus:ring-1 focus:ring-[var(--accent-primary)] transition-all"
               />
               <button
                 onClick={handlePersonSearch}
                 disabled={loading || !personSearch.trim()}
-                className="px-4 py-2.5 bg-[var(--bg-surface-soft)] border border-[var(--border-subtle)] rounded-lg font-medium text-sm flex items-center gap-2 hover:bg-[var(--accent-light)] hover:border-[var(--accent-primary)] hover:text-[var(--accent-primary)] disabled:opacity-50 disabled:cursor-not-allowed transition-all text-[var(--text-secondary)]"
+                className="w-full sm:w-auto px-4 py-2 sm:py-2.5 bg-[var(--bg-surface-soft)] border border-[var(--border-subtle)] rounded-lg font-medium text-sm flex items-center justify-center gap-2 hover:bg-[var(--accent-light)] hover:border-[var(--accent-primary)] hover:text-[var(--accent-primary)] disabled:opacity-50 disabled:cursor-not-allowed transition-all text-[var(--text-secondary)]"
               >
                 {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
                 Find
@@ -257,7 +257,7 @@ export default function SearchPage() {
 
           {/* Error Display */}
           {error && (
-            <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-center gap-3">
+            <div className="bg-red-50 border border-red-200 rounded-xl p-3 sm:p-4 flex items-center gap-2 sm:gap-3">
               <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
               <span className="text-red-700 text-sm">{error}</span>
             </div>
