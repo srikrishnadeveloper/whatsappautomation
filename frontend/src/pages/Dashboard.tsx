@@ -267,19 +267,6 @@ export default function Dashboard() {
               </div>
             )}
           </div>
-
-          <div className="soft-card p-5 bg-gradient-to-br from-indigo-500 to-purple-600 text-white relative overflow-hidden">
-            <div className="absolute top-0 right-0 -mt-4 -mr-4 w-24 h-24 bg-white opacity-10 rounded-full blur-2xl" />
-            <div className="relative z-10">
-              <h3 className="font-medium mb-1">Pro Tip</h3>
-              <p className="text-sm text-indigo-100 leading-relaxed">
-                Connect more groups to get better insights into your team's workflow.
-              </p>
-              <Link to="/connect" className="inline-block mt-3 text-xs font-medium bg-white/20 hover:bg-white/30 px-3 py-1.5 rounded-lg transition-colors">
-                Manage Connections
-              </Link>
-            </div>
-          </div>
         </div>
       </div>
     </div>
