@@ -105,8 +105,8 @@ export default function Connect() {
           } catch (err) {}
         }
         loadQr()
-        // Refresh every 20 seconds to match QR regeneration
-        const interval = setInterval(loadQr, 20000)
+        // Refresh every 55 seconds to match backend QR timeout (~60 seconds)
+        const interval = setInterval(loadQr, 55000)
         return () => {
           clearInterval(interval)
         }

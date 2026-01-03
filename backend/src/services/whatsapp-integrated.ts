@@ -157,6 +157,11 @@ let whatsappSocket: WASocket | null = null;
 let isStarting = false;
 let messagesProcessed = 0;
 let authState: Awaited<ReturnType<typeof useFirestoreAuthState>> | null = null;
+let lastQrTime = 0; // Track when last QR was generated
+let qrRetryCount = 0; // Track QR retry attempts
+let isAuthenticating = false; // Track if user is in authentication process
+const QR_TIMEOUT_MS = 60000; // QR code valid for 60 seconds (1 minute)
+const MAX_QR_RETRIES = 10; // Maximum QR regenerations before giving up
 
 // Store message with AI classification and create action items
 async function storeMessage(msg: proto.IWebMessageInfo): Promise<string | null> {
@@ -310,8 +315,20 @@ export async function startWhatsApp(): Promise<void> {
       markOnlineOnConnect: false,
       generateHighQualityLinkPreview: false,
       syncFullHistory: false,
-      logger: pino({ level: 'silent' }) as any
+      logger: pino({ level: 'silent' }) as any,
+      // QR code timeout - wait 60 seconds before regenerating
+      qrTimeout: QR_TIMEOUT_MS,
+      // Connection timeout
+      connectTimeoutMs: 120000, // 2 minutes for connection
+      // Keep alive to maintain connection
+      keepAliveIntervalMs: 30000,
+      // Retry on network issues
+      retryRequestDelayMs: 500
     });
+
+    // Reset QR state
+    qrRetryCount = 0;
+    isAuthenticating = false;
 
     // Handle connection updates
     whatsappSocket.ev.on('connection.update', async (update) => {
@@ -319,7 +336,30 @@ export async function startWhatsApp(): Promise<void> {
 
       // QR Code received - generate base64 image
       if (qr) {
-        console.log('📱 QR Code received from Baileys');
+        const now = Date.now();
+        
+        // Don't regenerate QR too quickly - wait at least 50 seconds
+        if (lastQrTime && (now - lastQrTime) < 50000) {
+          console.log('⏳ Skipping QR regeneration - too soon');
+          return;
+        }
+        
+        // Check if we've exceeded max retries
+        if (qrRetryCount >= MAX_QR_RETRIES) {
+          console.log('❌ Max QR retries reached');
+          updateWhatsAppState({
+            status: 'error',
+            error: 'QR code expired. Please try connecting again.',
+            qrCode: null
+          });
+          isStarting = false;
+          return;
+        }
+        
+        qrRetryCount++;
+        lastQrTime = now;
+        
+        console.log(`📱 QR Code received from Baileys (attempt ${qrRetryCount}/${MAX_QR_RETRIES})`);
         try {
           // Generate QR code as base64 data URL
           const qrImage = await QRCode.toDataURL(qr, {
@@ -335,10 +375,10 @@ export async function startWhatsApp(): Promise<void> {
             status: 'qr_ready',
             qrCode: qrImage,
             progress: 0,
-            progressText: 'Scan QR code with WhatsApp'
+            progressText: `Scan QR code with WhatsApp (${qrRetryCount}/${MAX_QR_RETRIES})`
           });
           
-          log.info('QR Code Ready', 'Scan with WhatsApp mobile app');
+          log.info('QR Code Ready', `Attempt ${qrRetryCount} - Valid for ~60 seconds`);
         } catch (err) {
           console.error('QR generation error:', err);
         }
@@ -346,6 +386,7 @@ export async function startWhatsApp(): Promise<void> {
 
       // Connection state changes
       if (connection === 'connecting') {
+        isAuthenticating = true;
         updateWhatsAppState({
           status: 'connecting',
           progressText: 'Connecting to WhatsApp servers...'
@@ -359,6 +400,11 @@ export async function startWhatsApp(): Promise<void> {
         const userPhone = user?.id?.split(':')[0] || user?.id || 'Unknown';
         
         console.log(`✅ WhatsApp connected as: ${userName} (${userPhone})`);
+        
+        // Reset all tracking vars on successful connection
+        qrRetryCount = 0;
+        lastQrTime = 0;
+        isAuthenticating = false;
         
         updateWhatsAppState({
           status: 'connected',
@@ -379,9 +425,10 @@ export async function startWhatsApp(): Promise<void> {
       // Connection closed
       if (connection === 'close') {
         const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+        const errorMessage = (lastDisconnect?.error as Boom)?.message || 'Unknown error';
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
         
-        console.log(`📱 Connection closed. Status: ${statusCode}, Reconnecting: ${shouldReconnect}`);
+        console.log(`📱 Connection closed. Status: ${statusCode}, Error: ${errorMessage}, Reconnecting: ${shouldReconnect}`);
         
         if (statusCode === DisconnectReason.loggedOut) {
           // User logged out - clear session
@@ -389,15 +436,49 @@ export async function startWhatsApp(): Promise<void> {
           if (authState) {
             await authState.clearSession();
           }
+          qrRetryCount = 0;
+          lastQrTime = 0;
+          isAuthenticating = false;
           updateWhatsAppState({
             status: 'disconnected',
             user: null,
             qrCode: null,
             error: 'Logged out from WhatsApp'
           });
+        } else if (statusCode === DisconnectReason.restartRequired) {
+          // Restart required - common after pairing
+          log.info('Restart Required', 'Reconnecting after pairing...');
+          isStarting = false;
+          // Quick reconnect for restart required
+          setTimeout(() => startWhatsApp(), 1000);
+        } else if (statusCode === DisconnectReason.connectionClosed || 
+                   statusCode === DisconnectReason.connectionLost) {
+          // Connection issues - try to reconnect
+          if (isAuthenticating) {
+            log.info('Authentication in progress', 'Waiting for device confirmation...');
+            updateWhatsAppState({
+              status: 'authenticating',
+              progressText: 'Waiting for confirmation on your phone...'
+            });
+            // Give more time during authentication
+            setTimeout(() => {
+              if (isAuthenticating) {
+                isStarting = false;
+                startWhatsApp();
+              }
+            }, 5000);
+          } else if (shouldReconnect) {
+            log.info('Reconnecting', 'Connection lost, attempting reconnect...');
+            updateWhatsAppState({
+              status: 'connecting',
+              progressText: 'Reconnecting...'
+            });
+            isStarting = false;
+            setTimeout(() => startWhatsApp(), 3000);
+          }
         } else if (shouldReconnect) {
-          // Auto-reconnect
-          log.info('Reconnecting', 'Connection lost, attempting reconnect...');
+          // Other reconnectable errors
+          log.info('Reconnecting', `Error: ${errorMessage}`);
           updateWhatsAppState({
             status: 'connecting',
             progressText: 'Reconnecting...'
@@ -406,6 +487,9 @@ export async function startWhatsApp(): Promise<void> {
           isStarting = false;
           setTimeout(() => startWhatsApp(), 3000);
         } else {
+          qrRetryCount = 0;
+          lastQrTime = 0;
+          isAuthenticating = false;
           updateWhatsAppState({
             status: 'disconnected',
             user: null,
