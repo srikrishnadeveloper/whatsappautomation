@@ -1,7 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { 
   Check,
-  Calendar,
   ChevronDown,
   ChevronRight,
   Loader2,
@@ -24,8 +23,6 @@ interface Task {
   priority: 'urgent' | 'high' | 'medium' | 'low'
   status: 'pending' | 'in_progress' | 'completed' | 'cancelled'
   category: 'work' | 'study' | 'personal' | 'urgent' | 'other'
-  dueDate?: string
-  dueTime?: string
   tags?: string[]
   sender?: string
   chatName?: string
@@ -46,29 +43,6 @@ function TaskRow({
   onShowInfo: (task: Task) => void
 }) {
   const isCompleted = task.status === 'completed'
-  const isOverdue = task.dueDate && new Date(task.dueDate) < new Date() && !isCompleted
-
-  const formatDate = (date: string) => {
-    const d = new Date(date)
-    // Check if date is valid
-    if (isNaN(d.getTime())) return ''
-    
-    const today = new Date()
-    const tomorrow = new Date(today)
-    tomorrow.setDate(tomorrow.getDate() + 1)
-    const yesterday = new Date(today)
-    yesterday.setDate(yesterday.getDate() - 1)
-    
-    if (d.toDateString() === today.toDateString()) return 'Today'
-    if (d.toDateString() === tomorrow.toDateString()) return 'Tomorrow'
-    if (d.toDateString() === yesterday.toDateString()) return 'Yesterday'
-    
-    // For dates in different year, show year
-    if (d.getFullYear() !== today.getFullYear()) {
-      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-    }
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-  }
 
   return (
     <div className={clsx(
@@ -113,16 +87,6 @@ function TaskRow({
 
       {/* Metadata */}
       <div className="flex items-center gap-1 sm:gap-2 text-xs text-[var(--text-muted)] shrink-0 ml-auto">
-        {task.dueDate && (
-          <span className={clsx(
-            'hidden sm:flex items-center gap-1',
-            isOverdue ? 'text-red-500 font-medium' : ''
-          )}>
-            <Calendar className="w-3 h-3" />
-            {formatDate(task.dueDate)}
-          </span>
-        )}
-
         {/* Actions */}
         <button
           onClick={(e) => {
@@ -235,8 +199,6 @@ export default function Tasks() {
           priority: action.priority || 'medium',
           status: action.status || 'pending',
           category: action.category || 'other',
-          dueDate: action.dueDate,
-          dueTime: action.dueTime,
           tags: action.tags || [],
           sender: action.sender,
           chatName: action.chatName,
@@ -461,13 +423,6 @@ export default function Tasks() {
                   <div className="p-2.5 bg-[var(--bg-surface-soft)] rounded-lg">
                     <p className="text-[10px] text-[var(--text-muted)] uppercase mb-0.5">Category</p>
                     <p className="text-xs font-medium text-[var(--text-primary)] capitalize">{selectedTask.category}</p>
-                  </div>
-                )}
-                
-                {selectedTask.dueDate && (
-                  <div className="p-2.5 bg-[var(--bg-surface-soft)] rounded-lg">
-                    <p className="text-[10px] text-[var(--text-muted)] uppercase mb-0.5">Due Date</p>
-                    <p className="text-xs font-medium text-[var(--text-primary)]">{formatDateTime(selectedTask.dueDate)}</p>
                   </div>
                 )}
                 

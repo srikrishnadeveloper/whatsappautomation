@@ -48,9 +48,6 @@ interface LogEntry {
   details?: string
 }
 
-// Track if we've shown initial status
-let initialStatusShown = false;
-
 export default function Connect() {
   const [state, setState] = useState<WhatsAppState>({
     status: 'disconnected',
