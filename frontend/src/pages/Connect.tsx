@@ -73,12 +73,24 @@ export default function Connect() {
   const [elapsedTime, setElapsedTime] = useState(0)
   const [currentTip, setCurrentTip] = useState(0)
   const [qrImageUrl, setQrImageUrl] = useState<string | null>(null)
+  const [serverWaking, setServerWaking] = useState(false)
+  const [wakingMessage, setWakingMessage] = useState('')
+  const [initialLoadMessage, setInitialLoadMessage] = useState('Checking connection status...')
   const sseRef = useRef<EventSource | null>(null)
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const hasInitialized = useRef(false)
 
   const fetchStatus = useCallback(async (showLoading = true) => {
     if (showLoading) setLoading(true)
+    
+    // Update message if initial load takes too long
+    let messageTimer: ReturnType<typeof setTimeout> | null = null
+    if (showLoading && !hasInitialized.current) {
+      messageTimer = setTimeout(() => {
+        setInitialLoadMessage('Server is waking up, please wait...')
+      }, 3000)
+    }
+    
     try {
       const res = await fetch(`${API_BASE}/whatsapp/status`)
       const json = await res.json()
@@ -91,7 +103,11 @@ export default function Connect() {
       }
     } catch (err) {
       console.error('Failed to fetch status:', err)
+      if (!hasInitialized.current) {
+        setInitialLoadMessage('Having trouble connecting to server...')
+      }
     } finally {
+      if (messageTimer) clearTimeout(messageTimer)
       if (showLoading) setLoading(false)
     }
   }, [])
@@ -146,10 +162,65 @@ export default function Connect() {
 
   const handleConnect = async () => {
     setActionLoading(true)
+    setServerWaking(true)
+    setWakingMessage('Connecting to server...')
+    
     try {
-      await fetch(`${API_BASE}/whatsapp/start`, { method: 'POST' })
-      await fetchStatus()
-    } catch (err) {} finally {
+      // First, check if the server is awake by doing a health check
+      const healthCheckTimeout = 45000 // 45 second timeout for cold starts
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), healthCheckTimeout)
+      
+      // Show progressive messages during server wake-up
+      const wakingMessages = [
+        'Connecting to server...',
+        'Server is waking up, please wait...',
+        'Almost there, initializing services...',
+        'Just a few more seconds...'
+      ]
+      
+      let messageIndex = 0
+      const messageInterval = setInterval(() => {
+        messageIndex = (messageIndex + 1) % wakingMessages.length
+        setWakingMessage(wakingMessages[messageIndex])
+      }, 5000)
+      
+      try {
+        // Health check to wake the server
+        await fetch(`${API_BASE}/health`, { 
+          signal: controller.signal,
+          cache: 'no-store'
+        })
+        clearTimeout(timeoutId)
+        clearInterval(messageInterval)
+        setWakingMessage('Server ready! Starting WhatsApp...')
+        
+        // Small delay to show the success message
+        await new Promise(resolve => setTimeout(resolve, 500))
+        
+        // Now start WhatsApp connection
+        setServerWaking(false)
+        await fetch(`${API_BASE}/whatsapp/start`, { method: 'POST' })
+        await fetchStatus()
+      } catch (healthError) {
+        clearTimeout(timeoutId)
+        clearInterval(messageInterval)
+        
+        if (healthError instanceof Error && healthError.name === 'AbortError') {
+          setWakingMessage('Server is taking longer than expected...')
+          // Still try to start WhatsApp even if health check times out
+          setServerWaking(false)
+          await fetch(`${API_BASE}/whatsapp/start`, { method: 'POST' })
+          await fetchStatus()
+        } else {
+          throw healthError
+        }
+      }
+    } catch (err) {
+      console.error('Connection error:', err)
+      setWakingMessage('')
+    } finally {
+      setServerWaking(false)
       setActionLoading(false)
     }
   }
@@ -287,8 +358,13 @@ export default function Connect() {
 
   if (loading && !hasInitialized.current) {
     return (
-      <div className="flex items-center justify-center h-[60vh]">
-        <Loader2 className="w-6 h-6 text-[var(--text-muted)] animate-spin" />
+      <div className="flex flex-col items-center justify-center h-[60vh]">
+        <div className="w-16 h-16 mb-4 rounded-2xl bg-gradient-to-br from-blue-100 to-indigo-100 flex items-center justify-center shadow-soft">
+          <Loader2 className="w-7 h-7 text-indigo-600 animate-spin" />
+        </div>
+        <h2 className="text-base font-medium text-[var(--text-primary)] mb-2">Loading</h2>
+        <p className="text-sm text-[var(--text-secondary)] mb-3">{initialLoadMessage}</p>
+        <p className="text-xs text-[var(--text-muted)]">This may take a moment if server is waking up</p>
       </div>
     )
   }
@@ -296,8 +372,38 @@ export default function Connect() {
   // Connection Card Content
   const ConnectionContent = () => (
     <>
+      {/* Server Waking Up State */}
+      {serverWaking && state.status === 'disconnected' && (
+        <div className="text-center py-8">
+          <div className="w-16 h-16 mx-auto mb-5 rounded-2xl bg-gradient-to-br from-amber-100 to-orange-100 flex items-center justify-center shadow-soft">
+            <div className="relative">
+              <Loader2 className="w-7 h-7 text-amber-600 animate-spin" />
+            </div>
+          </div>
+          <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-2">Starting Server</h2>
+          <p className="text-sm text-[var(--text-secondary)] mb-4 max-w-xs mx-auto">
+            {wakingMessage || 'Connecting to server...'}
+          </p>
+          
+          {/* Progress dots animation */}
+          <div className="flex justify-center gap-1.5 mb-5">
+            <span className="w-2 h-2 bg-amber-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></span>
+            <span className="w-2 h-2 bg-amber-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
+            <span className="w-2 h-2 bg-amber-600 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
+          </div>
+          
+          <div className="bg-amber-50/80 border border-amber-200/50 rounded-lg px-4 py-3 max-w-xs mx-auto">
+            <p className="text-xs text-amber-700">
+              <span className="font-medium">⏱️ First connection?</span>
+              <br />
+              The server may take 10-30 seconds to wake up. Please wait...
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Disconnected State */}
-      {state.status === 'disconnected' && (
+      {state.status === 'disconnected' && !serverWaking && (
         <div className="text-center py-8">
           <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-[var(--bg-surface-soft)] flex items-center justify-center">
             <WifiOff className="w-6 h-6 text-[var(--text-muted)]" />
@@ -306,12 +412,16 @@ export default function Connect() {
           <p className="text-xs text-[var(--text-secondary)] mb-5">Link your account to extract tasks</p>
           <button
             onClick={handleConnect}
-            disabled={actionLoading}
-            className="btn-primary inline-flex items-center gap-2 px-5 py-2.5 text-sm"
+            disabled={actionLoading || serverWaking}
+            className="btn-primary inline-flex items-center gap-2 px-5 py-2.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {actionLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wifi className="w-4 h-4" />}
-            Connect
+            {actionLoading ? 'Connecting...' : 'Connect'}
           </button>
+          
+          <p className="text-[10px] text-[var(--text-muted)] mt-3 px-8">
+            ⚡ First load may take a moment if server is sleeping
+          </p>
         </div>
       )}
 
