@@ -166,59 +166,123 @@ export default function Connect() {
     setWakingMessage('Connecting to server...')
     
     try {
-      // First, check if the server is awake by doing a health check
-      const healthCheckTimeout = 45000 // 45 second timeout for cold starts
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), healthCheckTimeout)
-      
       // Show progressive messages during server wake-up
       const wakingMessages = [
         'Connecting to server...',
         'Server is waking up, please wait...',
+        'Cold start detected, hang tight...',
         'Almost there, initializing services...',
-        'Just a few more seconds...'
+        'Just a few more seconds...',
+        'Still working on it...'
       ]
       
       let messageIndex = 0
       const messageInterval = setInterval(() => {
         messageIndex = (messageIndex + 1) % wakingMessages.length
         setWakingMessage(wakingMessages[messageIndex])
-      }, 5000)
+      }, 4000)
       
-      try {
-        // Health check to wake the server
-        await fetch(`${API_BASE}/health`, { 
-          signal: controller.signal,
-          cache: 'no-store'
-        })
-        clearTimeout(timeoutId)
-        clearInterval(messageInterval)
-        setWakingMessage('Server ready! Starting WhatsApp...')
+      // Retry health check up to 3 times with increasing timeouts
+      let serverReady = false
+      let attempts = 0
+      const maxAttempts = 3
+      
+      while (!serverReady && attempts < maxAttempts) {
+        attempts++
+        const timeout = 20000 * attempts // 20s, 40s, 60s
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), timeout)
         
-        // Small delay to show the success message
-        await new Promise(resolve => setTimeout(resolve, 500))
-        
-        // Now start WhatsApp connection
-        setServerWaking(false)
-        await fetch(`${API_BASE}/whatsapp/start`, { method: 'POST' })
-        await fetchStatus()
-      } catch (healthError) {
-        clearTimeout(timeoutId)
-        clearInterval(messageInterval)
-        
-        if (healthError instanceof Error && healthError.name === 'AbortError') {
-          setWakingMessage('Server is taking longer than expected...')
-          // Still try to start WhatsApp even if health check times out
-          setServerWaking(false)
-          await fetch(`${API_BASE}/whatsapp/start`, { method: 'POST' })
-          await fetchStatus()
-        } else {
-          throw healthError
+        try {
+          const response = await fetch(`${API_BASE}/health`, { 
+            signal: controller.signal,
+            cache: 'no-store'
+          })
+          clearTimeout(timeoutId)
+          
+          if (response.ok) {
+            serverReady = true
+          } else {
+            // Server responded but with error - wait and retry
+            await new Promise(resolve => setTimeout(resolve, 3000))
+          }
+        } catch (err) {
+          clearTimeout(timeoutId)
+          if (attempts < maxAttempts) {
+            // Wait before retrying
+            setWakingMessage(`Retrying connection (attempt ${attempts + 1}/${maxAttempts})...`)
+            await new Promise(resolve => setTimeout(resolve, 5000))
+          }
         }
       }
+      
+      clearInterval(messageInterval)
+      
+      if (!serverReady) {
+        setWakingMessage('Server is slow, but trying anyway...')
+        await new Promise(resolve => setTimeout(resolve, 1000))
+      } else {
+        setWakingMessage('Server ready! Starting WhatsApp...')
+        await new Promise(resolve => setTimeout(resolve, 500))
+      }
+      
+      // Now start WhatsApp connection - but keep serverWaking true
+      // until we get a meaningful status update
+      setWakingMessage('Initializing WhatsApp connection...')
+      
+      await fetch(`${API_BASE}/whatsapp/start`, { method: 'POST' })
+      
+      // Poll for status until we get something other than 'disconnected'
+      let statusAttempts = 0
+      const maxStatusAttempts = 15 // Try for up to 30 seconds
+      
+      while (statusAttempts < maxStatusAttempts) {
+        statusAttempts++
+        
+        try {
+          const res = await fetch(`${API_BASE}/whatsapp/status`)
+          const json = await res.json()
+          
+          if (json.success && json.data) {
+            const status = json.data.status
+            
+            // If we got a real status (not disconnected), update state and exit
+            if (status !== 'disconnected') {
+              setState(prev => ({
+                ...json.data,
+                messagesProcessed: json.data.messagesProcessed || prev.messagesProcessed
+              }))
+              setServerWaking(false)
+              setActionLoading(false)
+              return // Success! Exit the function
+            }
+          }
+        } catch (err) {
+          // Ignore fetch errors during polling
+        }
+        
+        // Wait before next poll
+        setWakingMessage(`Waiting for WhatsApp to start... (${statusAttempts}/${maxStatusAttempts})`)
+        await new Promise(resolve => setTimeout(resolve, 2000))
+      }
+      
+      // If we got here, we timed out waiting for status
+      // Keep checking - the backend might still be starting
+      setWakingMessage('WhatsApp is still initializing...')
+      await fetchStatus()
+      
+      // If still disconnected after all that, show a message but keep UI stable
+      if (state.status === 'disconnected') {
+        setWakingMessage('Connection is taking longer than usual. Please wait or try again.')
+        // Keep serverWaking true for a bit longer
+        await new Promise(resolve => setTimeout(resolve, 3000))
+      }
+      
     } catch (err) {
       console.error('Connection error:', err)
-      setWakingMessage('')
+      setWakingMessage('Connection failed. Please try again.')
+      // Don't immediately reset - give user time to see the error
+      await new Promise(resolve => setTimeout(resolve, 2000))
     } finally {
       setServerWaking(false)
       setActionLoading(false)
