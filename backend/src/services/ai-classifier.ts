@@ -33,9 +33,9 @@ export function initGemini() {
   try {
     genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
     model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-    // gemini-2.0-flash handles both text and image (multimodal)
-    visionModel = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-    log.success('Gemini AI initialized', 'Using gemini-2.0-flash (text + vision)');
+    // gemini-2.5-flash for vision — better image understanding + OCR accuracy
+    visionModel = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+    log.success('Gemini AI initialized', 'text=gemini-2.0-flash | vision=gemini-2.5-flash');
     return true;
   } catch (error: any) {
     log.error('Failed to initialize Gemini', error.message);
@@ -389,6 +389,8 @@ export async function classifyWithAI(content: string, sender: string): Promise<C
     'work': 'work',
     'study': 'study',
     'personal': 'personal',
+    'urgent': 'urgent',
+    'spam': 'spam',
     'ignore': 'casual',
   };
 
@@ -399,29 +401,12 @@ export async function classifyWithAI(content: string, sender: string): Promise<C
     'low': 'low',
   };
 
-  // If rule-based is confident enough (≥ 0.80), skip AI entirely
-  if (ruleResult.confidence >= 0.80) {
-    ruleOnlyCount++;
-    const mappedCategory = categoryMap[ruleResult.category] || 'casual';
-    const mappedPriority = priorityMap[ruleResult.priority] || 'low';
+  // Rule-based runs first to extract signals (keywords, priority, deadlines)
+  // but we ALWAYS pass to Gemini for the final word — no confidence bypass.
+  // Short messages and media-only are the only exceptions (no point sending to AI).
 
-    clog.logRuleBasedResult(mappedCategory, mappedPriority, decision, ruleResult.confidence, ruleResult.keywords_matched);
-    log.info('Rule-based classification', 
-      `${mappedCategory} | ${mappedPriority} | ${decision} | confidence=${ruleResult.confidence.toFixed(2)} [${ruleResult.keywords_matched.join(', ')}]`);
-
-    return {
-      category: mappedCategory,
-      priority: decision === 'ignore' ? 'none' : mappedPriority,
-      decision,
-      reasoning: `Rule-based (${ruleResult.confidence.toFixed(2)}): matched [${ruleResult.keywords_matched.slice(0, 5).join(', ')}]`,
-      suggestedTask: decision === 'create' ? content.slice(0, 80) : undefined,
-      deadline: ruleResult.has_deadline ? 'detected' : undefined,
-      actionItems: [],
-    };
-  }
-
-  // Short messages (< 20 chars) — rules are enough, don't waste AI tokens
-  if (content.length < 20) {
+  // Short messages (< 12 chars) — rules are enough
+  if (content.length < 12) {
     ruleOnlyCount++;
     clog.logRuleBasedResult(categoryMap[ruleResult.category] || 'casual', priorityMap[ruleResult.priority] || 'low', decision, ruleResult.confidence, ['short msg']);
     return {
@@ -449,15 +434,25 @@ export async function classifyWithAI(content: string, sender: string): Promise<C
   // ---- STEP 2: Try ML classifier (free, fast, ~97% accuracy) ----
   if (isMLClassifierReady()) {
     const mlResult = classifyWithML(content);
-    if (mlResult && mlResult.confidence >= 0.65) {
+    if (mlResult && mlResult.confidence >= 0.80) {
       mlCallCount++;
       const mlCategory = categoryMap[mlResult.category] || 'casual';
       const mlPriority = priorityMap[mlResult.priority] || 'low';
       const mlDecision = mlResult.has_action_verb || mlResult.has_deadline
         ? 'create' as const
-        : mlResult.confidence >= 0.8
+        : mlResult.confidence >= 0.9
           ? (mlResult.category === 'ignore' ? 'ignore' as const : 'create' as const)
           : 'review' as const;
+
+      // Extract basic action items from ML classification
+      const mlActionItems: ExtractedActionItem[] = [];
+      if (mlDecision === 'create' && content.length > 15) {
+        mlActionItems.push({
+          title: content.slice(0, 80),
+          priority: mlPriority === 'high' ? 'high' : 'medium',
+          type: mlResult.has_deadline ? 'deadline' : 'task',
+        });
+      }
 
       clog.logMLResult(mlCategory, mlPriority, mlDecision, mlResult.confidence, mlResult.inference_time_ms, mlCallCount);
       log.info('ML Classification',
@@ -470,7 +465,7 @@ export async function classifyWithAI(content: string, sender: string): Promise<C
         reasoning: `ML model (${mlResult.confidence.toFixed(2)}): ${mlResult.keywords_matched.slice(0, 5).join(', ') || 'pattern match'}`,
         suggestedTask: mlDecision === 'create' ? content.slice(0, 80) : undefined,
         deadline: mlResult.has_deadline ? 'detected' : undefined,
-        actionItems: [],
+        actionItems: mlActionItems,
       };
     }
   }
@@ -566,7 +561,7 @@ export function classifyWithRules(content: string): ClassificationResult {
   const decision = makeDecision(ruleResult, content.length);
 
   const categoryMap: Record<string, ClassificationResult['category']> = {
-    'work': 'work', 'study': 'study', 'personal': 'personal', 'ignore': 'casual',
+    'work': 'work', 'study': 'study', 'personal': 'personal', 'urgent': 'urgent', 'spam': 'spam', 'ignore': 'casual',
   };
   const priorityMap: Record<string, ClassificationResult['priority']> = {
     'urgent': 'high', 'high': 'high', 'medium': 'medium', 'low': 'low',

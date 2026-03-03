@@ -10,7 +10,7 @@
     "test": "jest"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.2.1",
+    "@google/generative-ai": "^0.24.1",
     "@hapi/boom": "^10.0.1",
     "@supabase/supabase-js": "^2.89.0",
     "@types/compression": "^1.8.1",

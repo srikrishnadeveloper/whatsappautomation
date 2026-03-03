@@ -6,14 +6,13 @@
 import { Outlet, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { 
   Inbox,
-  FileText, 
   Settings, 
   Menu, 
   Smartphone,
   CheckSquare,
   LogOut,
   ChevronDown,
-  Search
+  MessageSquare
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import clsx from 'clsx'
@@ -23,8 +22,7 @@ import { API_BASE, authFetch, authSSEUrl } from '../services/api'
 const navigation = [
   { name: 'Inbox',           href: '/dashboard', icon: Inbox },
   { name: 'Tasks',           href: '/tasks',     icon: CheckSquare },
-  { name: 'AI Search',       href: '/search',    icon: Search },
-  { name: 'Summary',         href: '/summary',   icon: FileText },
+  { name: 'AI Chat',         href: '/search',    icon: MessageSquare },
   { name: 'Connect WhatsApp', href: '/',          icon: Smartphone },
   { name: 'Settings',        href: '/settings',  icon: Settings },
 ]
@@ -80,7 +78,7 @@ export default function Layout() {
   const isConnected = waStatus.status === 'connected'
 
   return (
-    <div className="min-h-screen bg-[var(--bg-primary)] flex font-sans text-[var(--text-primary)] overflow-x-hidden w-full">
+    <div className="h-screen bg-[var(--bg-primary)] flex font-sans text-[var(--text-primary)] overflow-hidden w-full">
       {/* Mobile sidebar backdrop */}
       {sidebarOpen && (
         <div 
@@ -174,9 +172,9 @@ export default function Layout() {
       </aside>
 
       {/* Main content */}
-      <div className="flex-1 lg:ml-64 min-h-screen flex flex-col transition-all duration-300 min-w-0 w-full">
+      <div className="flex-1 lg:ml-64 h-screen flex flex-col transition-all duration-300 min-w-0 w-full overflow-hidden">
         {/* Top bar - mobile only */}
-        <header className="lg:hidden flex items-center justify-between px-4 py-3 border-b border-[var(--border-subtle)] bg-[var(--bg-surface)]/80 backdrop-blur-md sticky top-0 z-30">
+        <header className="lg:hidden flex items-center justify-between px-4 py-3 border-b border-[var(--border-subtle)] bg-[var(--bg-surface)]/80 backdrop-blur-md sticky top-0 z-30 flex-shrink-0">
           <div className="flex items-center gap-3">
             <button
               className="p-2 -ml-2 rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-surface-soft)] transition-colors"
@@ -191,7 +189,7 @@ export default function Layout() {
         </header>
 
         {/* Page content */}
-        <main className="flex-1 p-2 sm:p-6 lg:p-8 max-w-6xl mx-auto w-full animate-fade-in overflow-x-hidden relative">
+        <main className="flex-1 p-2 sm:p-6 lg:p-8 max-w-6xl mx-auto w-full animate-fade-in overflow-x-hidden overflow-y-auto relative min-h-0">
           <Outlet />
         </main>
       </div>

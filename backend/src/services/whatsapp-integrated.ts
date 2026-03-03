@@ -26,6 +26,7 @@ import { hybridActionItems } from './hybrid-action-items';
 import { classifyWithAI, initGemini, analyzeImageWithGemini, analyzeDocumentWithGemini } from './ai-classifier';
 import { isSenderBlocked } from './privacy-settings';
 import { useSupabaseAuthState } from './supabase-auth-state';
+import { supabase } from '../config/supabase';
 import log from './activity-log';
 import clog from './console-logger';
 import { systemState } from './system-state';
@@ -512,14 +513,26 @@ async function storeMessage(msg: proto.IWebMessageInfo): Promise<string | null> 
 
         // Cache the buffer so the user can download it from the frontend
         if (msg.key.id) {
+          const imgFileName = `image_${msg.key.id}.${mimeType.split('/')[1] || 'jpg'}`;
           addToMediaCache(msg.key.id, {
             buffer: imageBuffer,
             mimeType,
-            fileName: `image_${msg.key.id}.${mimeType.split('/')[1] || 'jpg'}`,
+            fileName: imgFileName,
             size: imageBuffer.length,
             cachedAt: Date.now(),
             mediaType: 'image',
           });
+          // Persist media ref to Supabase for cross-restart visibility
+          if (sessionOwnerId && supabase) {
+            Promise.resolve(supabase.from('media_cache_refs').upsert({
+              user_id: sessionOwnerId,
+              message_key: msg.key.id,
+              mime_type: mimeType,
+              file_name: imgFileName,
+              file_size: imageBuffer.length,
+              media_type: 'image',
+            }, { onConflict: 'user_id,message_key' })).then(() => {}).catch(() => {});
+          }
         }
 
         // Use rich combined content for downstream classification
@@ -573,6 +586,17 @@ async function storeMessage(msg: proto.IWebMessageInfo): Promise<string | null> 
             mediaType: mediaTypeLabel as MediaCacheEntry['mediaType'],
           });
           log.info(`📦 ${mediaTypeLabel} cached`, `${fileName} (${(buf.length / 1024).toFixed(1)} KB)`);
+          // Persist media ref to Supabase for cross-restart visibility
+          if (sessionOwnerId && supabase) {
+            Promise.resolve(supabase.from('media_cache_refs').upsert({
+              user_id: sessionOwnerId,
+              message_key: msg.key.id,
+              mime_type: mimeType,
+              file_name: fileName,
+              file_size: buf.length,
+              media_type: mediaTypeLabel,
+            }, { onConflict: 'user_id,message_key' })).then(() => {}).catch(() => {});
+          }
 
           // ── Document → Gemini analysis pipeline ──────────────────────────
           if (isDocument) {
@@ -601,7 +625,8 @@ async function storeMessage(msg: proto.IWebMessageInfo): Promise<string | null> 
     const isGroup   = chatName.endsWith('@g.us');
 
     // ── Privacy check: skip classification for ignored contacts/groups ──────────
-    const isBlocked = await isSenderBlocked(userId, chatName);
+    // Pass sessionOwnerJwt so the authenticated Supabase client is used and RLS works
+    const isBlocked = await isSenderBlocked(userId, chatName, sessionOwnerJwt ?? undefined);
     if (isBlocked) {
       clog.logPrivacyBlocked(sender);
       // Store for history but mark as private — no AI, no action items
@@ -1273,6 +1298,11 @@ export async function startWhatsApp(force: boolean = false): Promise<void> {
         // Skip status updates
         if (msg.key.remoteJid === 'status@broadcast') {
           clog.logSkipStatus();
+          continue;
+        }
+
+        // Skip WhatsApp Channels / Newsletters (@newsletter JIDs)
+        if (msg.key.remoteJid?.endsWith('@newsletter')) {
           continue;
         }
 

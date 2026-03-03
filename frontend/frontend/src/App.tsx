@@ -3,7 +3,6 @@ import { AuthProvider } from './context/AuthContext'
 import ProtectedRoute from './components/ProtectedRoute'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
-import Summary from './pages/Summary'
 import Settings from './pages/Settings'
 import Connect from './pages/Connect'
 import Tasks from './pages/Tasks'
@@ -39,7 +38,6 @@ function App() {
             <Route path="actions" element={<ActionItems />} />
             <Route path="search" element={<Search />} />
             <Route path="gmail" element={<Dashboard />} />
-            <Route path="summary" element={<Summary />} />
             <Route path="settings" element={<Settings />} />
           </Route>
         </Routes>

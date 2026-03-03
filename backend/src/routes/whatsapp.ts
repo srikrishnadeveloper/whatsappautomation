@@ -337,10 +337,15 @@ router.get('/media/:messageKey', (req: Request, res: Response) => {
   // Safe filename — strip any path traversal chars
   const safeName = entry.fileName.replace(/[^a-zA-Z0-9._\- ]/g, '_');
 
+  // Images and stickers are served inline so <img> tags can display them directly
+  const isInlineMedia = entry.mimeType.startsWith('image/');
+  const disposition   = isInlineMedia ? `inline; filename="${safeName}"` : `attachment; filename="${safeName}"`;
+
   res.setHeader('Content-Type', entry.mimeType);
-  res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+  res.setHeader('Content-Disposition', disposition);
   res.setHeader('Content-Length', entry.size.toString());
   res.setHeader('Cache-Control', 'private, max-age=300');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
   res.send(entry.buffer);
 });
 

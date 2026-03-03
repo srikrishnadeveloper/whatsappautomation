@@ -141,10 +141,14 @@ function formatFileSize(bytes: number): string {
 function toInboxItem(msg: WAMessage): InboxItem {
   const mediaType = msg.metadata?.mediaType || null
   const isMedia = !!mediaType
-  const lines = (msg.content || '').split('\n').filter(Boolean)
+  const content = msg.content || ''
+  const lines = content.split('\n').filter(Boolean)
+
+  // Detect placeholder content: backend sets e.g. [Media/No Content] or [Image - analysis failed]
+  const isPlaceholder = !isMedia && content.startsWith('[') && content.endsWith(']')
 
   let subject = lines[0]?.slice(0, 80) || '(no content)'
-  let summary = lines.slice(1).join(' ').slice(0, 140) || msg.content.slice(0, 140)
+  let summary = lines.slice(1).join(' ').slice(0, 140) || content.slice(0, 140)
 
   if (isMedia && mediaType !== 'document') {
     subject = MEDIA_TYPE_LABELS[mediaType]?.label ?? 'Media'
@@ -152,6 +156,10 @@ function toInboxItem(msg: WAMessage): InboxItem {
   } else if (mediaType === 'document') {
     subject = msg.metadata?.document?.fileName || 'Document'
     summary = `${msg.metadata?.document?.mimeType ?? ''} ${formatFileSize(msg.metadata?.document?.fileSize ?? 0)}`.trim()
+  } else if (isPlaceholder) {
+    // Sent media or unsupported message type — show a friendlier label
+    subject = content.includes('Document') ? '📄 Document' : '📎 Media'
+    summary = 'Format not supported for preview'
   }
 
   return {
@@ -209,12 +217,30 @@ function relativeTime(iso: string): string {
 // -- Expanded: WhatsApp --------------------------------------------------------
 
 function ExpandedWA({ msg }: { msg: WAMessage }) {
-  const [downloading, setDownloading] = useState(false)
-  const [dlError, setDlError] = useState<string | null>(null)
+  const [downloading, setDownloading]   = useState(false)
+  const [dlError, setDlError]           = useState<string | null>(null)
+  const [imgUrl, setImgUrl]             = useState<string | null>(null)
+  const [imgLoading, setImgLoading]     = useState(false)
+  const [imgFailed, setImgFailed]       = useState(false)
 
   const messageKey = msg.metadata?.messageKey
   const mediaType  = msg.metadata?.mediaType
   const hasMedia   = !!mediaType && !!messageKey
+
+  // Auto-load image from media cache for inline preview
+  useEffect(() => {
+    if (mediaType !== 'image' || !messageKey) return
+    let objectUrl: string | null = null
+    setImgLoading(true)
+    setImgFailed(false)
+    setImgUrl(null)
+    authFetch(`${API_BASE}/whatsapp/media/${encodeURIComponent(messageKey)}`)
+      .then(res => { if (!res.ok) throw new Error('not_in_cache'); return res.blob() })
+      .then(blob => { objectUrl = URL.createObjectURL(blob); setImgUrl(objectUrl) })
+      .catch(() => setImgFailed(true))
+      .finally(() => setImgLoading(false))
+    return () => { if (objectUrl) URL.revokeObjectURL(objectUrl) }
+  }, [mediaType, messageKey])
 
   const handleDownload = async () => {
     if (!messageKey) return
@@ -255,6 +281,39 @@ function ExpandedWA({ msg }: { msg: WAMessage }) {
       {/* Media / document card  — shown for all non-text messages */}
       {hasMedia ? (
         <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface-soft)] overflow-hidden">
+
+          {/* ── Image preview section ── */}
+          {mediaType === 'image' && (
+            <>
+              {/* Loading state */}
+              {imgLoading && (
+                <div className="flex items-center justify-center h-40 bg-[var(--bg-surface)]">
+                  <Loader2 className="w-6 h-6 animate-spin text-[var(--text-muted)]" />
+                </div>
+              )}
+
+              {/* Image loaded — show it */}
+              {imgUrl && !imgLoading && (
+                <div className="relative bg-black/5 dark:bg-black/20">
+                  <img
+                    src={imgUrl}
+                    alt={msg.metadata?.imageAnalysis?.description || 'WhatsApp image'}
+                    className="w-full max-h-72 object-contain rounded-t-xl"
+                  />
+                </div>
+              )}
+
+              {/* Not in cache — friendly message */}
+              {imgFailed && !imgLoading && (
+                <div className="flex items-center gap-2 px-3 py-3 bg-amber-50 dark:bg-amber-900/20 border-b border-amber-100 dark:border-amber-900 text-xs text-amber-700 dark:text-amber-400">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>Image not in cache — received before this server session or server was restarted</span>
+                </div>
+              )}
+            </>
+          )}
+
+          {/* ── Info row: icon + metadata + download ── */}
           <div className="flex items-center gap-3 p-3">
             {/* Icon */}
             <div className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 ${
@@ -323,37 +382,80 @@ function ExpandedWA({ msg }: { msg: WAMessage }) {
             </button>
           </div>
 
-          {/* Error row */}
-          {dlError && (
-            <div className="flex items-center gap-2 px-3 py-2 bg-red-50 dark:bg-red-900/20 border-t border-red-100 dark:border-red-900 text-xs text-red-600 dark:text-red-400">
+          {/* Download error row (non-image types) */}
+          {dlError && mediaType !== 'image' && (
+            <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 dark:bg-amber-900/20 border-t border-amber-100 dark:border-amber-900 text-xs text-amber-700 dark:text-amber-400">
               <AlertCircle className="w-3.5 h-3.5 shrink-0" />
               <span>{dlError}</span>
-              <span className="ml-auto text-[10px] text-red-400">
-                {!messageKey ? 'No message key' : 'File not in cache — was it received before server restart?'}
+              <span className="ml-auto text-[10px]">
+                {!messageKey ? 'No message key' : 'File not in cache — received before server restart?'}
               </span>
+            </div>
+          )}
+
+          {/* Download error row (image — download specifically failed after preview loaded fine) */}
+          {dlError && mediaType === 'image' && (
+            <div className="flex items-center gap-2 px-3 py-2 bg-red-50 dark:bg-red-900/20 border-t border-red-100 dark:border-red-900 text-xs text-red-600 dark:text-red-400">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+              <span>Download failed: {dlError}</span>
             </div>
           )}
         </div>
       ) : (
         <div className="p-3 bg-[var(--bg-surface-soft)] rounded-lg">
-          <p className="text-sm text-[var(--text-primary)] whitespace-pre-wrap leading-relaxed">
-            {msg.content}
-          </p>
+          {msg.content && msg.content.startsWith('[') && msg.content.endsWith(']') ? (
+            <div className="flex items-center gap-2 text-sm text-[var(--text-muted)] italic">
+              <Paperclip className="w-4 h-4 shrink-0" />
+              <span>
+                {msg.content === '[Media/No Content]'
+                  ? 'Media message — format not supported for preview (video, audio, or sticker)'
+                  : msg.content === '[Image - analysis failed]'
+                  ? 'Image received but could not be analyzed (Gemini Vision error)'
+                  : msg.content.replace(/^\[|\]$/g, '')}
+              </span>
+            </div>
+          ) : (
+            <p className="text-sm text-[var(--text-primary)] whitespace-pre-wrap leading-relaxed">
+              {msg.content}
+            </p>
+          )}
         </div>
       )}
 
-      {/* AI image analysis detail */}
-      {msg.metadata?.imageAnalysis?.extractedText && (
-        <div className="flex items-start gap-2 p-2.5 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-100 dark:border-blue-800">
-          <Zap className="w-3.5 h-3.5 text-blue-500 shrink-0 mt-0.5" />
-          <div className="min-w-0">
-            <p className="text-[10px] font-semibold text-blue-500 uppercase tracking-wide mb-0.5">Extracted text</p>
-            <p className="text-xs text-blue-700 dark:text-blue-300 leading-relaxed break-words">
-              {msg.metadata.imageAnalysis.extractedText}
-            </p>
+      {/* AI Vision Analysis section — shown whenever Gemini analyzed this image */}
+      {msg.metadata?.imageAnalysis && (msg.metadata.imageAnalysis.description || msg.metadata.imageAnalysis.extractedText) && (
+        <div className="rounded-lg border border-blue-100 dark:border-blue-900 overflow-hidden">
+          <div className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 dark:bg-blue-900/30 border-b border-blue-100 dark:border-blue-900">
+            <Zap className="w-3 h-3 text-blue-500" />
+            <p className="text-[10px] font-semibold text-blue-600 dark:text-blue-400 uppercase tracking-wider">Gemini Vision Analysis</p>
+          </div>
+          <div className="p-3 bg-blue-50/40 dark:bg-blue-900/10 space-y-2">
+            {msg.metadata.imageAnalysis.description && (
+              <div>
+                <p className="text-[10px] font-semibold text-blue-500 uppercase tracking-wide mb-0.5">Description</p>
+                <p className="text-xs text-[var(--text-primary)] leading-relaxed">
+                  {msg.metadata.imageAnalysis.description}
+                </p>
+              </div>
+            )}
+            {msg.metadata.imageAnalysis.extractedText && (
+              <div>
+                <p className="text-[10px] font-semibold text-blue-500 uppercase tracking-wide mb-0.5">Text found in image</p>
+                <p className="text-xs text-[var(--text-primary)] font-mono leading-relaxed whitespace-pre-wrap break-words bg-white dark:bg-black/20 rounded px-2 py-1.5 border border-blue-100 dark:border-blue-900">
+                  {msg.metadata.imageAnalysis.extractedText}
+                </p>
+              </div>
+            )}
+            {msg.metadata.imageAnalysis.hasActionable && (
+              <div className="flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400 font-medium">
+                <CheckCheck className="w-3 h-3" />
+                Contains actionable content
+              </div>
+            )}
           </div>
         </div>
       )}
+
       {msg.metadata?.suggestedTask && (
         <div className="flex items-start gap-2 p-2 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg border border-emerald-200 dark:border-emerald-800">
           <Zap className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
@@ -362,6 +464,7 @@ function ExpandedWA({ msg }: { msg: WAMessage }) {
           </p>
         </div>
       )}
+
       <div className="flex flex-wrap gap-1.5">
         {msg.classification && msg.classification !== 'ignore' && (
           <span className={`text-[10px] px-2 py-0.5 rounded-full border ${CATEGORY_CHIP[msg.classification] ?? CATEGORY_CHIP.personal}`}>
