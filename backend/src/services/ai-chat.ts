@@ -2,13 +2,17 @@
  * AI Chat Service — Conversational AI over WhatsApp & Gmail messages
  *
  * Features:
- *  - Multi-turn conversation with memory (50 turns per user)
+ *  - Multi-turn conversation with memory across sessions
+ *  - Long-term USER MEMORY: remembers name, preferences, language, contacts
+ *  - Web search via Gemini Google Search grounding (real-time info)
+ *  - Smart intent routing: inbox | web | general knowledge | task
  *  - Dynamic model selection: user picks or auto-selects
  *  - Task management: create / complete / delete tasks via chat
  *  - Privacy-aware: never exposes messages from blocked senders
  *  - Auto-retry on AI failures (up to 2 retries)
  *  - Corrupted document content filtering
  *  - Source citations with full media references
+ *  - File analysis: documents, images, audio
  */
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
@@ -59,6 +63,7 @@ export interface ChatMessage {
   content: string;
   timestamp: string;
   sources?: ChatSource[];
+  webSources?: WebSource[];
   suggestions?: string[];
   stats?: { messagesSearched: number; sourcesFound: number };
   /** Which model produced this response */
@@ -67,6 +72,23 @@ export interface ChatMessage {
   retryCount?: number;
   /** Task action the AI performed */
   taskAction?: TaskActionResult;
+  /** Query intent classification */
+  intent?: QueryIntent;
+}
+
+export interface WebSource {
+  title: string;
+  uri: string;
+  snippet?: string;
+}
+
+export type QueryIntent = 'inbox' | 'web' | 'general' | 'task' | 'memory';
+
+export interface UserMemoryFact {
+  key: string;
+  value: string;
+  confidence?: number;
+  source?: string;
 }
 
 export interface ChatSource {
@@ -362,6 +384,215 @@ export function initChatAI(): boolean {
     log.error('Failed to initialize AI Chat', error.message);
     return false;
   }
+}
+
+// ── User Memory System ────────────────────────────────────────────────────
+// Persistent per-user facts extracted from conversations + explicit statements.
+// Injected into every AI prompt so the AI always knows who it's talking to.
+
+// In-memory cache: userId → {key → value}
+const userMemoryCache = new Map<string, Record<string, string>>();
+
+export async function loadUserMemory(userId: string): Promise<Record<string, string>> {
+  if (userMemoryCache.has(userId)) return userMemoryCache.get(userId)!;
+  if (!supabase) return {};
+  try {
+    const { data } = await supabase
+      .from('user_memory')
+      .select('key,value')
+      .eq('user_id', userId)
+      .limit(50);
+    const mem: Record<string, string> = {};
+    for (const row of (data || [])) mem[row.key] = row.value;
+    userMemoryCache.set(userId, mem);
+    return mem;
+  } catch { return {}; }
+}
+
+export async function saveUserMemoryFact(userId: string, key: string, value: string, source = 'chat'): Promise<void> {
+  const mem = userMemoryCache.get(userId) || {};
+  mem[key] = value;
+  userMemoryCache.set(userId, mem);
+  if (!supabase) return;
+  try {
+    await supabase.from('user_memory').upsert(
+      { user_id: userId, key, value, source, updated_at: new Date().toISOString() },
+      { onConflict: 'user_id,key' }
+    );
+  } catch {}
+}
+
+export async function deleteUserMemoryFact(userId: string, key: string): Promise<void> {
+  const mem = userMemoryCache.get(userId) || {};
+  delete mem[key];
+  userMemoryCache.set(userId, mem);
+  if (!supabase) return;
+  try {
+    await supabase.from('user_memory').delete().eq('user_id', userId).eq('key', key);
+  } catch {}
+}
+
+export async function getUserMemoryAll(userId: string): Promise<UserMemoryFact[]> {
+  const mem = await loadUserMemory(userId);
+  return Object.entries(mem).map(([key, value]) => ({ key, value }));
+}
+
+/** Asynchronously extract user facts from a conversation turn and persist them. */
+async function extractAndSaveMemory(userId: string, userQuery: string, aiReply: string): Promise<void> {
+  if (!genAI) return;
+  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-lite' as ModelId });
+  try {
+    const prompt = `Extract 0-5 personal facts the USER explicitly stated about themselves from this message.
+Only extract facts the user said: their name, language they speak, their job/workplace, where they live, preferences, timezone, or similar personal context.
+Do NOT extract facts about other people, do NOT hallucinate.
+If nothing is extractable, return {}.
+
+User's message: "${userQuery.slice(0, 400)}"
+
+Return ONLY valid JSON, no prose: {"fact_key": "fact_value"}
+where fact_key examples: user_name, user_language, user_location, user_job, user_timezone, preference_response_style, frequent_contact_X`;
+    const result = await model.generateContent(prompt);
+    const text = result.response.text().trim();
+    const match = text.match(/\{[^}]*\}/);
+    if (!match) return;
+    const facts: Record<string, string> = JSON.parse(match[0]);
+    for (const [k, v] of Object.entries(facts)) {
+      if (k && v && typeof v === 'string' && v.length < 200) {
+        await saveUserMemoryFact(userId, k, v, 'extracted');
+        log.info('Memory saved', `user=${userId} key=${k}`);
+      }
+    }
+  } catch {}
+}
+
+function buildMemorySection(memory: Record<string, string>): string {
+  const entries = Object.entries(memory);
+  if (entries.length === 0) return '';
+  const lines = entries.slice(0, 20).map(([k, v]) => {
+    const label = k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    return `  - ${label}: ${v}`;
+  }).join('\n');
+  return `\nUSER PROFILE (facts you know about this user — use naturally in your answers):\n${lines}\n`;
+}
+
+// ── Query Intent Detection ────────────────────────────────────────────────
+// Classifies what the user wants: search their inbox, search the web,
+// answer from AI knowledge, manage tasks, or update their memory profile.
+
+const WEB_SIGNALS   = /\b(news|latest|current events|today's news|stock price|weather|sports score|match result|trending|who is|what is [a-z]|how do|how does|how to|meaning of|definition|translate|convert|calculate|formula|recipe|tutorial|best way|explain|difference between|when was|where is|why is|wikipedia|search for)\b/i;
+const INBOX_SIGNALS = /\b(message|whatsapp|gmail|email|sent|received|wrote|said|asked|replied|chat|group|forward|document|file|pdf|photo|image|video|audio|attachment|shared|somebody|someone sent|alice|bob|contact)\b/i;
+const MEMORY_SIGNALS = /\b(remember (that|me|my|i am|i'm)|my name is|i am from|i live in|i work at|i speak|call me|update my|forget (that|my|me)|what do you know about me|about me|my preference|my profile)\b/i;
+
+export function detectQueryIntent(query: string, inboxCandidateCount = 0): QueryIntent {
+  // Task operations take priority
+  if (detectTaskIntent(query).action !== 'none') return 'task';
+  // Explicit memory management
+  if (MEMORY_SIGNALS.test(query)) return 'memory';
+  // Has strong inbox references OR inbox search returned good results
+  if (INBOX_SIGNALS.test(query) || inboxCandidateCount > 3) return 'inbox';
+  // Needs live web data
+  if (WEB_SIGNALS.test(query)) return 'web';
+  // Short queries with no inbox results → likely general knowledge
+  if (inboxCandidateCount === 0) return 'general';
+  return 'inbox';
+}
+
+// ── Web Search via Gemini Google Search Grounding ─────────────────────────
+// Uses Gemini's native google_search tool to retrieve real-time information.
+
+export async function searchWeb(
+  userQuery: string,
+  conversationHistory: ChatMessage[],
+  memory: Record<string, string>,
+  modelId: ModelId,
+): Promise<{ reply: string; webSources: WebSource[]; suggestions: string[] }> {
+  if (!genAI) return { reply: 'AI not available.', webSources: [], suggestions: [] };
+
+  const memSection = buildMemorySection(memory);
+  const histLines = conversationHistory.slice(-6).map(h =>
+    h.role === 'user' ? `User: ${h.content.slice(0, 300)}` : `Assistant: ${h.content.slice(0, 300)}`
+  ).join('\n');
+
+  const prompt = `You are Mindline AI — a helpful, precise assistant.
+Today's date: ${new Date().toISOString().slice(0, 10)}
+${memSection}
+${histLines ? `\nRecent conversation:\n${histLines}\n` : ''}
+User's question: ${userQuery}
+
+Answer in a clear, helpful way. Use markdown formatting (bold, bullets). Be concise but thorough.
+After your answer, suggest 3 follow-up questions as a JSON object:
+{"suggestions": ["q1","q2","q3"]}`;
+
+  try {
+    // Use Google Search grounding for real-time info
+    const modelWithSearch = (genAI as any).getGenerativeModel({
+      model: modelId,
+      tools: [{ googleSearch: {} }],
+    });
+    const result = await modelWithSearch.generateContent(prompt);
+    const response = await result.response;
+    const text: string = response.text();
+
+    // Extract grounding metadata (web sources)
+    const groundingMeta = (response as any).candidates?.[0]?.groundingMetadata;
+    const webSources: WebSource[] = ((groundingMeta?.groundingChunks || []) as any[])
+      .map(c => ({ title: c.web?.title || '', uri: c.web?.uri || '' }))
+      .filter(s => s.uri);
+
+    // Try to extract suggestions JSON from end of response
+    let reply = text;
+    let suggestions: string[] = [];
+    const sugMatch = text.match(/\{[\s\S]*"suggestions"[\s\S]*\}/);
+    if (sugMatch) {
+      try {
+        const parsed = JSON.parse(sugMatch[0]);
+        suggestions = (parsed.suggestions || []).slice(0, 4);
+        reply = text.slice(0, text.indexOf(sugMatch[0])).trim();
+      } catch {}
+    }
+    if (!reply) reply = text;
+
+    return { reply, webSources, suggestions };
+  } catch (err: any) {
+    log.error('Web search failed, falling back to model knowledge', err.message);
+    // Fallback: answer from model training data without grounding
+    try {
+      const fallbackModel = getModelInstance(modelId) || getModelInstance('gemini-2.0-flash' as ModelId);
+      if (!fallbackModel) throw new Error('No model');
+      const result2 = await fallbackModel.generateContent(prompt);
+      const text2 = result2.response.text();
+      return { reply: text2, webSources: [], suggestions: [] };
+    } catch {
+      return { reply: 'I could not retrieve information for this question. Please try again.', webSources: [], suggestions: [] };
+    }
+  }
+}
+
+// ── Handle Memory Updates ─────────────────────────────────────────────────
+
+async function handleMemoryUpdate(userId: string, userQuery: string): Promise<string> {
+  // Extract explicit facts the user is telling us to remember
+  const rememberMatch = userQuery.match(/remember\s+(?:that\s+)?(.+)/i);
+  const myNameIs = userQuery.match(/(?:my name is|call me|i am|i'm)\s+([A-Za-z]+)/i);
+  const iLiveIn = userQuery.match(/(?:i live in|i am from|i'm from)\s+(.+?)(?:\.|$)/i);
+  const iWorkAt = userQuery.match(/(?:i work at|i work for|i'm at)\s+(.+?)(?:\.|$)/i);
+  const iSpeak = userQuery.match(/(?:i speak|my language is)\s+(.+?)(?:\.|$)/i);
+
+  const saved: string[] = [];
+
+  if (myNameIs) { await saveUserMemoryFact(userId, 'user_name', myNameIs[1], 'explicit'); saved.push(`your name (${myNameIs[1]})`); }
+  if (iLiveIn) { await saveUserMemoryFact(userId, 'user_location', iLiveIn[1].trim(), 'explicit'); saved.push(`location (${iLiveIn[1].trim()})`); }
+  if (iWorkAt) { await saveUserMemoryFact(userId, 'user_job', iWorkAt[1].trim(), 'explicit'); saved.push(`workplace (${iWorkAt[1].trim()})`); }
+  if (iSpeak) { await saveUserMemoryFact(userId, 'user_language', iSpeak[1].trim(), 'explicit'); saved.push(`language (${iSpeak[1].trim()})`); }
+  if (rememberMatch && saved.length === 0) {
+    await saveUserMemoryFact(userId, `note_${Date.now()}`, rememberMatch[1].trim(), 'explicit');
+    saved.push(`note: "${rememberMatch[1].trim()}"`);
+  }
+
+  if (saved.length > 0) {
+    return `Got it! I've saved to your profile: ${saved.join(', ')}. I'll remember this in all future conversations.`;
+  }
+  return 'I\'ve noted that. If you\'d like me to remember specific facts about you, say "My name is..." or "Remember that..."';
 }
 
 // ── Sync keyword extraction ────────────────────────────────────────────────
