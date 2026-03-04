@@ -760,30 +760,6 @@ function detectTaskIntent(query: string): TaskIntent {
 // ── Pre-filter ──────────────────────────────────────────────────────────────
 
 /**
- * PASS 1 — Ask Gemini to extract search keywords from the user query.
- * Returns an array of keywords Gemini thinks are most useful to search for.
- * Uses the cheapest/fastest model (flash-lite) to keep latency low.
- */
-async function extractKeywordsWithGemini(query: string, model: any): Promise<string[]> {
-  try {
-    const prompt = `Extract the most important search keywords from this user question. Return ONLY a JSON array of lowercase strings (no explanation, no markdown). Include synonyms and related terms. Max 10 keywords.
-
-User question: "${query}"
-
-Example output: ["project", "report", "deadline", "submit"]`;
-    const result = await model.generateContent(prompt);
-    const text = result.response.text().trim();
-    const match = text.match(/\[.*\]/s);
-    if (!match) return query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
-    const keywords: string[] = JSON.parse(match[0]);
-    return keywords.filter(k => typeof k === 'string' && k.length > 1);
-  } catch {
-    // Fallback: just split the query
-    return query.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 2);
-  }
-}
-
-/**
  * PASS 1 filter — search all messages for keyword matches, return top hits.
  * Optionally pre-filters by a date range before keyword matching.
  */
