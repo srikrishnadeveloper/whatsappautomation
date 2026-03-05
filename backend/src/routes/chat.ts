@@ -663,4 +663,45 @@ router.delete('/memory', async (req: Request, res: Response) => {
   }
 });
 
+// ── Embedding backfill & stats ──────────────────────────────────────────────
+
+/**
+ * POST /api/chat/embeddings/backfill
+ * Backfill embeddings for messages that don't have them yet.
+ */
+router.post('/embeddings/backfill', async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId!;
+    const { backfillEmbeddings, getEmbeddingStats } = await import('../services/embedding-service');
+    const result = await backfillEmbeddings(userId);
+    const stats = getEmbeddingStats();
+    res.json({
+      success: true,
+      backfill: result,
+      embeddingService: stats,
+    });
+  } catch (error: any) {
+    log.error('Backfill embeddings error', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * GET /api/chat/embeddings/stats
+ * Get embedding service stats (cache size, model info).
+ */
+router.get('/embeddings/stats', async (req: Request, res: Response) => {
+  try {
+    const { getEmbeddingStats } = await import('../services/embedding-service');
+    const { getCacheStats } = await import('../services/response-cache');
+    res.json({
+      success: true,
+      embeddings: getEmbeddingStats(),
+      responseCache: getCacheStats(),
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 export default router;

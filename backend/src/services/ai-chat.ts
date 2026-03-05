@@ -19,6 +19,10 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { randomUUID } from 'crypto';
 import log from './activity-log';
 import { supabase } from '../config/supabase';
+import { hybridRetrieve, rewriteQuery, RetrievalResult } from './hybrid-retrieval';
+import { initEmbeddingService, backfillEmbeddings } from './embedding-service';
+import { getCachedResponse, setCachedResponse } from './response-cache';
+import type { RerankResult } from './reranker-service';
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_API_KEY;
 
@@ -398,6 +402,12 @@ export function initChatAI(): boolean {
   }
   try {
     genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+    // Initialize embedding service for vector search
+    initEmbeddingService();
+    // Fire-and-forget: backfill embeddings for existing messages on first startup
+    backfillEmbeddings().then(r => {
+      if (r.total > 0) log.info('Startup backfill', `Embedded ${r.success}/${r.total} messages`);
+    }).catch(() => {});
     log.success('AI Chat initialized', `Models: ${AVAILABLE_MODELS.map(m => m.id).join(', ')}`);
     return true;
   } catch (error: any) {
@@ -783,14 +793,71 @@ function detectTaskIntent(query: string): TaskIntent {
   return { action: 'none' };
 }
 
+// ── Query complexity detection ──────────────────────────────────────────────
+// Returns 'simple' | 'moderate' | 'complex' to drive dynamic context window
+function detectQueryComplexity(query: string, keywordCount: number): 'simple' | 'moderate' | 'complex' {
+  const q = query.toLowerCase();
+  // Complex: comparisons, aggregations, multi-person, analysis
+  if (/\b(compare|difference|between .+ and|summarize all|overview|analysis|every|all messages from|everything)\b/.test(q)) return 'complex';
+  if (/\b(how many|count|total|statistics|trend|pattern|history of)\b/.test(q)) return 'complex';
+  if (keywordCount >= 5) return 'complex';
+  // Simple: single-entity lookups, yes/no, greetings
+  if (keywordCount <= 1) return 'simple';
+  if (/\b(latest|last|most recent|newest|did .+ send)\b/.test(q)) return 'simple';
+  return 'moderate';
+}
+
+// Dynamic context limits based on query complexity
+function getContextLimits(complexity: 'simple' | 'moderate' | 'complex'): { candidateLimit: number; contentMaxLen: number; tokenBudgetHint: string } {
+  switch (complexity) {
+    case 'simple':   return { candidateLimit: 80,  contentMaxLen: 600,  tokenBudgetHint: 'Reply concisely in 1-3 short paragraphs. Get straight to the point.' };
+    case 'moderate': return { candidateLimit: 200, contentMaxLen: 1000, tokenBudgetHint: 'Reply in a well-structured response. Use bullet points for multiple items.' };
+    case 'complex':  return { candidateLimit: 350, contentMaxLen: 1200, tokenBudgetHint: 'Provide a thorough, detailed analysis. Use headers, bullets, and clear organization.' };
+  }
+}
+
+// ── Conversation history summarization ──────────────────────────────────────
+// Compresses old conversation turns into a compact summary to reduce token bloat
+function summarizeHistory(history: ChatMessage[]): { summary: string; recentTurns: ChatMessage[] } {
+  if (history.length <= 8) {
+    // Short history — keep all turns, no summarization needed
+    return { summary: '', recentTurns: history };
+  }
+
+  // Split: older turns get summarized, recent 8 kept verbatim
+  const cutoff = history.length - 8;
+  const olderTurns = history.slice(0, cutoff);
+  const recentTurns = history.slice(cutoff);
+
+  // Build compact summary of older turns
+  const topicSet = new Set<string>();
+  for (const turn of olderTurns) {
+    if (turn.role === 'user') {
+      // Extract key topics from user queries
+      const words = turn.content.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
+        .filter(w => w.length >= 3 && !AI_STOP_WORDS.has(w));
+      words.slice(0, 3).forEach(w => topicSet.add(w));
+    }
+  }
+
+  const topics = [...topicSet].slice(0, 10).join(', ');
+  const turnCount = olderTurns.length;
+  const summary = topics
+    ? `[Earlier in this conversation (${turnCount} messages): discussed ${topics}]`
+    : `[Earlier: ${turnCount} messages exchanged]`;
+
+  return { summary, recentTurns };
+}
+
 // ── Pre-filter ──────────────────────────────────────────────────────────────
 
 /**
  * PASS 1 filter — search all messages for keyword matches, return top hits.
+ * Uses TF-IDF-inspired scoring: rarer keywords get higher weight.
  * Optionally pre-filters by a date range before keyword matching.
  */
 function searchByKeywords(keywords: string[], messages: MessageData[], limit = 300, dateRange?: DateRange | null): MessageData[] {
-  // Pre-filter by date range if provided (B5/E11 fix)
+  // Pre-filter by date range if provided
   const pool = dateRange ? (() => {
     const from = new Date(dateRange.dateFrom).getTime();
     const to   = new Date(dateRange.dateTo).getTime();
@@ -802,31 +869,63 @@ function searchByKeywords(keywords: string[], messages: MessageData[], limit = 3
 
   if (keywords.length === 0) return pool.slice(-limit);
 
-  const results: Array<{ msg: MessageData; hits: number }> = [];
-  for (const m of pool) {
-    const blob = [
-      m.sender, m.chat_name ?? '', m.content,
-      m.metadata?.document?.fileName ?? '',
-      m.metadata?.imageAnalysis?.description ?? '',
-      m.metadata?.imageAnalysis?.extractedText ?? '',
-      m.metadata?.documentAnalysis?.summary ?? '',
-      m.metadata?.documentAnalysis?.extractedText ?? '',
-      m.metadata?.documentAnalysis?.topics?.join(' ') ?? '',
-      m.metadata?.documentAnalysis?.keyEntities?.join(' ') ?? '',
-      m.metadata?.documentAnalysis?.documentType ?? '',
-    ].join(' ').toLowerCase();
+  // Compute IDF-like weight per keyword: rarer keywords score higher
+  const kwFrequency = new Map<string, number>();
+  const blobs = pool.map(m => [
+    m.sender, m.chat_name ?? '', m.content,
+    m.metadata?.document?.fileName ?? '',
+    m.metadata?.imageAnalysis?.description ?? '',
+    m.metadata?.imageAnalysis?.extractedText ?? '',
+    m.metadata?.documentAnalysis?.summary ?? '',
+    m.metadata?.documentAnalysis?.extractedText ?? '',
+    m.metadata?.documentAnalysis?.topics?.join(' ') ?? '',
+    m.metadata?.documentAnalysis?.keyEntities?.join(' ') ?? '',
+    m.metadata?.documentAnalysis?.documentType ?? '',
+  ].join(' ').toLowerCase());
 
-    let hits = 0;
-    for (const kw of keywords) {
-      if (blob.includes(kw)) hits++;
-    }
-    if (hits > 0) results.push({ msg: m, hits });
+  for (const kw of keywords) {
+    let docCount = 0;
+    for (const blob of blobs) { if (blob.includes(kw)) docCount++; }
+    kwFrequency.set(kw, docCount);
   }
 
-  // Sort by hit count desc, then by recency for ties
+  const poolSize = pool.length || 1;
+  const kwWeights = new Map<string, number>();
+  for (const kw of keywords) {
+    const df = kwFrequency.get(kw) || 0;
+    // IDF weight: rare keywords get higher score
+    kwWeights.set(kw, df === 0 ? 0 : Math.log(poolSize / (df + 1)) + 1);
+  }
+
+  const results: Array<{ msg: MessageData; score: number; hits: number }> = [];
+  for (let i = 0; i < pool.length; i++) {
+    const blob = blobs[i];
+    let score = 0;
+    let hits = 0;
+    for (const kw of keywords) {
+      if (blob.includes(kw)) {
+        hits++;
+        score += kwWeights.get(kw) || 1;
+        // Bonus for exact match in sender/chat_name (high-value fields)
+        const senderLower = pool[i].sender?.toLowerCase() || '';
+        const chatLower = pool[i].chat_name?.toLowerCase() || '';
+        if (senderLower.includes(kw)) score += 2;
+        if (chatLower.includes(kw)) score += 1.5;
+      }
+    }
+    if (hits > 0) {
+      // Recency boost: newer messages get a small bonus
+      const ageMs = Date.now() - new Date(pool[i].timestamp).getTime();
+      const recencyBoost = Math.max(0, 1 - (ageMs / (30 * 24 * 60 * 60 * 1000))); // decays over 30 days
+      score += recencyBoost * 0.5;
+      results.push({ msg: pool[i], score, hits });
+    }
+  }
+
+  // Sort by score desc, then by recency for ties
   results.sort((a, b) =>
-    b.hits !== a.hits
-      ? b.hits - a.hits
+    b.score !== a.score
+      ? b.score - a.score
       : new Date(b.msg.timestamp).getTime() - new Date(a.msg.timestamp).getTime()
   );
 
@@ -878,7 +977,7 @@ function fmtRelative(ts: string): string {
   } catch { return ''; }
 }
 
-function buildMessageContext(messages: MessageData[]): string {
+function buildMessageContext(messages: MessageData[], contentMaxLen = 1200): string {
   return messages.map((m, i) => {
     const ts = fmtTs(m.timestamp);
     const rel = fmtRelative(m.timestamp);
@@ -886,8 +985,8 @@ function buildMessageContext(messages: MessageData[]): string {
     let line = `[${i}] FROM: ${m.sender} | CHAT: ${m.chat_name || 'DM'} | TIME: ${ts} (${rel})`;
     if (mediaType) line += ` | TYPE: ${mediaType.toUpperCase()}`;
 
-    // Full content — don't truncate short messages, give AI max useful data
-    const contentDisplay = m.content.length > 1200 ? m.content.slice(0, 1200) + '…' : m.content;
+    // Dynamic content length based on query complexity
+    const contentDisplay = m.content.length > contentMaxLen ? m.content.slice(0, contentMaxLen) + '…' : m.content;
     line += `\nCONTENT: ${contentDisplay}`;
 
     // ── Document/File info — critical for file queries ──
@@ -943,36 +1042,38 @@ function buildConversationPrompt(
   messageContext: string,
   candidateCount: number,
   totalMessages: number,
-  memorySection = ''
+  memorySection = '',
+  tokenBudgetHint = ''
 ): string {
-  // Keep last 16 turns for better follow-up context (B1 fix)
-  const recentHistory = history.slice(-16);
+  // Summarize old history to reduce token bloat, keep recent turns verbatim
+  const { summary: historySummary, recentTurns } = summarizeHistory(history);
 
-  // IMPORTANT: Strip verbose content from AI responses in history.
-  // AI responses quote inbox messages — if we send them back verbatim the AI can
-  // mistake stale recycled quotes for fresh inbox data → message confusion.
   let conversationSection = '';
-  if (recentHistory.length > 0) {
-    const histLines = recentHistory.map(h => {
+  if (historySummary) {
+    conversationSection += `\n${historySummary}\n`;
+  }
+  if (recentTurns.length > 0) {
+    const histLines = recentTurns.map(h => {
       if (h.role === 'user') {
         return `USER_ASKED: ${h.content.slice(0, 500)}`;
       } else {
-        // For AI turns: 500 chars to preserve enough context for follow-up questions (B1 fix)
         const brief = h.content.replace(/\*\*/g, '').slice(0, 500);
         return `AI_REPLIED: ${brief}${h.content.length > 500 ? '...' : ''}`;
       }
     }).join('\n');
-    conversationSection =
+    conversationSection +=
       '\nPRIOR CONVERSATION TURNS (for follow-up context ONLY — these are NOT inbox messages):\n' +
       histLines + '\n';
   }
+
+  const budgetLine = tokenBudgetHint ? `\nRESPONSE STYLE: ${tokenBudgetHint}\n` : '';
 
   return `You are Mindline AI — a smart personal assistant with full access to the user's WhatsApp and Gmail inbox.
 You can read every message, document, image, and attachment they've received.
 
 TODAY: ${new Date().toISOString().slice(0, 10)}
 DATABASE: ${totalMessages} total messages | ${candidateCount} relevant messages shown below
-${memorySection}${conversationSection}
+${memorySection}${conversationSection}${budgetLine}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 INBOX DATA (sorted oldest → newest — bottom entries = most recent)
 Each entry has: [index] FROM | CHAT | TIME (relative age)
@@ -1016,13 +1117,18 @@ function buildStreamingPrompt(
   messageContext: string,
   candidateCount: number,
   totalMessages: number,
-  memorySection = ''
+  memorySection = '',
+  tokenBudgetHint = ''
 ): string {
-  const recentHistory = history.slice(-16);
+  // Summarize old history to reduce token bloat, keep recent turns verbatim
+  const { summary: historySummary, recentTurns } = summarizeHistory(history);
 
   let conversationSection = '';
-  if (recentHistory.length > 0) {
-    const histLines = recentHistory.map(h => {
+  if (historySummary) {
+    conversationSection += `\n${historySummary}\n`;
+  }
+  if (recentTurns.length > 0) {
+    const histLines = recentTurns.map(h => {
       if (h.role === 'user') {
         return `USER_ASKED: ${h.content.slice(0, 500)}`;
       } else {
@@ -1030,17 +1136,19 @@ function buildStreamingPrompt(
         return `AI_REPLIED: ${brief}${h.content.length > 500 ? '...' : ''}`;
       }
     }).join('\n');
-    conversationSection =
+    conversationSection +=
       '\nPRIOR CONVERSATION TURNS (for follow-up context ONLY — these are NOT inbox messages):\n' +
       histLines + '\n';
   }
+
+  const budgetLine = tokenBudgetHint ? `\nRESPONSE STYLE: ${tokenBudgetHint}\n` : '';
 
   return `You are Mindline AI — a smart personal assistant with full access to the user's WhatsApp and Gmail inbox.
 You can read every message, document, image, and attachment they've received.
 
 TODAY: ${new Date().toISOString().slice(0, 10)}
 DATABASE: ${totalMessages} total messages | ${candidateCount} relevant messages shown below
-${memorySection}${conversationSection}
+${memorySection}${conversationSection}${budgetLine}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 INBOX DATA (sorted oldest → newest — bottom entries = most recent)
 Each entry has: [index] FROM | CHAT | TIME (relative age)
@@ -1134,22 +1242,54 @@ export async function chat(
   // 2. Clean all messages (filter corrupted content)
   const cleanedMessages = messages.map(cleanMessageContent);
 
-  // 3. SINGLE-PASS SEARCH (B4/D4 fix: removed Gemini pre-call to halve latency)
-  //    Extract keywords synchronously, detect date range, then search messages.
+  // 3. HYBRID RAG RETRIEVAL — vector + keyword + reranker
+  //    Uses pgvector semantic search, keyword search, and multi-signal reranking.
   const keywords = extractKeywordsSync(userQuery);
   const dateRange = detectDateQuery(userQuery);
-  log.info('Keyword extraction (sync)', `query="${userQuery.slice(0,40)}" → [${keywords.join(', ')}]${dateRange ? ` DATE:${dateRange.dateFrom.slice(0,10)}→${dateRange.dateTo.slice(0,10)}` : ''}`);
+  const complexity = detectQueryComplexity(userQuery, keywords.length);
+  const contextLimits = getContextLimits(complexity);
+  log.info('Hybrid retrieval starting', `query="${userQuery.slice(0,40)}" complexity=${complexity} limit=${contextLimits.candidateLimit}`);
+
+  // Check response cache first
+  const cachedResp = await getCachedResponse(userQuery, userId);
+  if (cachedResp && cachedResp.message) {
+    log.info('Cache hit', `query="${userQuery.slice(0,40)}"`);
+    pushMessage(sessionId, cachedResp.message, userId);
+    return cachedResp;
+  }
 
   let candidates: MessageData[];
-  if (keywords.length > 0 || dateRange) {
-    candidates = searchByKeywords(keywords, cleanedMessages, 300, dateRange);
-  } else {
-    // No keywords — fall back to most recent 300 messages
-    candidates = cleanedMessages
-      .slice()
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-      .slice(0, 300)
-      .reverse();
+  let retrievalStats: any = {};
+  try {
+    const retrievalResult = await hybridRetrieve(userQuery, cleanedMessages, {
+      userId,
+      maxResults: contextLimits.candidateLimit,
+      dateRange: dateRange ? { start: new Date(dateRange.dateFrom), end: new Date(dateRange.dateTo) } : null,
+    });
+    candidates = retrievalResult.candidates.map(c => ({
+      id: c.id,
+      sender: c.sender,
+      chat_name: c.chat_name,
+      content: c.content,
+      timestamp: c.timestamp,
+      classification: c.classification,
+      metadata: c.metadata,
+    }));
+    retrievalStats = retrievalResult.stats;
+    log.info('Hybrid retrieval complete',
+      `vector=${retrievalStats.vectorHits} keyword=${retrievalStats.keywordHits} reranked=${retrievalStats.afterRerank} time=${retrievalStats.retrievalTimeMs}ms`);
+  } catch (err: any) {
+    // Fallback to keyword-only search if hybrid fails
+    log.error('Hybrid retrieval failed, falling back to keyword search', err.message);
+    if (keywords.length > 0 || dateRange) {
+      candidates = searchByKeywords(keywords, cleanedMessages, contextLimits.candidateLimit, dateRange);
+    } else {
+      candidates = cleanedMessages
+        .slice()
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+        .slice(0, contextLimits.candidateLimit)
+        .reverse();
+    }
   }
 
   // 4. Load user memory + detect intent
@@ -1220,21 +1360,29 @@ export async function chat(
     return { message: fallbackMsg, conversationId: sessionId, sessionId, sessionTitle: fallbackTitle };
   }
 
-  // 5. Attempt AI generation with auto-retry
+  // 5. Attempt AI generation with auto-retry and improved fallback chain
   const MAX_RETRIES = 2;
+  // Fallback chain: user's model → flash → 2.5-flash (covers quota, model, and transient errors)
+  const FALLBACK_CHAIN: ModelId[] = [
+    modelId,
+    modelId !== 'gemini-3-flash-preview' ? 'gemini-3-flash-preview' as ModelId : 'gemini-2.5-flash' as ModelId,
+    'gemini-2.5-flash' as ModelId,
+  ];
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const messageContext = buildMessageContext(candidates);
+      const messageContext = buildMessageContext(candidates, contextLimits.contentMaxLen);
       const history = getHistory(sessionId);
-      const prompt = buildConversationPrompt(userQuery, history.slice(0, -1), messageContext, candidates.length, totalMessages, memSection);
+      const prompt = buildConversationPrompt(
+        userQuery, history.slice(0, -1), messageContext,
+        candidates.length, totalMessages, memSection,
+        contextLimits.tokenBudgetHint
+      );
 
-      // Use a different model on retry if premium fails
-      const retryModelId = attempt > 0
-        ? (modelId === 'gemini-3.1-pro-preview' ? 'gemini-3-flash-preview' as ModelId : 'gemini-2.5-flash' as ModelId)
-        : modelId;
-      const activeModel = attempt > 0 ? getModelInstance(retryModelId) || model : model;
+      // Use fallback chain model on retry
+      const retryModelId = FALLBACK_CHAIN[Math.min(attempt, FALLBACK_CHAIN.length - 1)];
+      const activeModel = getModelInstance(retryModelId) || model;
 
       const result = await activeModel.generateContent(prompt);
       const response = await result.response;
@@ -1245,16 +1393,21 @@ export async function chat(
       if (!jsonMatch) throw new Error('Could not parse AI response as JSON');
       const parsed = JSON.parse(jsonMatch[0]);
 
-      // B3: Match-based sources — find candidates whose sender/chat name appears in the reply
-      // This is reliable because the AI is instructed to name senders when citing messages.
+      // Improved source matching — word-boundary aware to avoid false positives
       const replyLower = (parsed.reply || '').toLowerCase();
       const seenSourceIds = new Set<string>();
       const sources: ChatSource[] = candidates
         .filter(m => {
-          const senderLower = (m.sender || '').toLowerCase();
-          const chatLower   = (m.chat_name || '').toLowerCase();
-          return (senderLower.length > 2 && replyLower.includes(senderLower)) ||
-                 (chatLower.length   > 2 && replyLower.includes(chatLower));
+          const senderLower = (m.sender || '').toLowerCase().trim();
+          const chatLower   = (m.chat_name || '').toLowerCase().trim();
+          // Require min 3 chars AND word-boundary-ish match (space/punctuation before/after)
+          const senderMatch = senderLower.length > 2 && (
+            new RegExp(`\\b${senderLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(replyLower)
+          );
+          const chatMatch = chatLower.length > 2 && (
+            new RegExp(`\\b${chatLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(replyLower)
+          );
+          return senderMatch || chatMatch;
         })
         .slice(0, 8)
         .map(m => buildSource(m, 'Mentioned in response'))
@@ -1285,14 +1438,23 @@ export async function chat(
         `model=${attempt > 0 ? retryModelId : modelId} | query="${userQuery.slice(0, 40)}" | sources=${sources.length} | total=${totalMessages}`);
 
       const sessionTitle = sessionMetaStore.get(sessionId)?.title;
-      return { message: assistantMsg, conversationId: sessionId, sessionId, sessionTitle };
+      const chatResult = { message: assistantMsg, conversationId: sessionId, sessionId, sessionTitle };
+
+      // Cache the response (fire-and-forget)
+      setCachedResponse(userQuery, userId, chatResult).catch(() => {});
+
+      return chatResult;
 
     } catch (error: any) {
       lastError = error;
-      log.error(`AI Chat attempt ${attempt + 1}/${MAX_RETRIES + 1} failed`, error.message);
+      const errMsg = error.message || '';
+      const isQuota = /quota|rate.?limit|429|resource.?exhausted/i.test(errMsg);
+      const isModel = /not.?found|invalid.?model|404/i.test(errMsg);
+      log.error(`AI Chat attempt ${attempt + 1}/${MAX_RETRIES + 1} failed`, `${isQuota ? '[QUOTA] ' : isModel ? '[MODEL] ' : ''}${errMsg}`);
       if (attempt < MAX_RETRIES) {
-        // Brief delay before retry
-        await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+        // Longer delay for quota errors, shorter for model errors
+        const delay = isQuota ? 3000 * (attempt + 1) : 1000 * (attempt + 1);
+        await new Promise(r => setTimeout(r, delay));
       }
     }
   }
@@ -1344,18 +1506,40 @@ export async function chatStream(
   };
   pushMessage(sessionId, userMsg, userId);
 
-  // Clean & search
+  // Clean & search with HYBRID RAG retrieval
   const cleanedMessages = messages.map(cleanMessageContent);
   const keywords = extractKeywordsSync(userQuery);
   const dateRange = detectDateQuery(userQuery);
+  const streamComplexity = detectQueryComplexity(userQuery, keywords.length);
+  const streamContextLimits = getContextLimits(streamComplexity);
 
   let candidates: MessageData[];
-  if (keywords.length > 0 || dateRange) {
-    candidates = searchByKeywords(keywords, cleanedMessages, 300, dateRange);
-  } else {
-    candidates = cleanedMessages.slice().sort((a, b) =>
-      new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-    ).slice(0, 300).reverse();
+  try {
+    const retrievalResult = await hybridRetrieve(userQuery, cleanedMessages, {
+      userId,
+      maxResults: streamContextLimits.candidateLimit,
+      dateRange: dateRange ? { start: new Date(dateRange.dateFrom), end: new Date(dateRange.dateTo) } : null,
+    });
+    candidates = retrievalResult.candidates.map(c => ({
+      id: c.id,
+      sender: c.sender,
+      chat_name: c.chat_name,
+      content: c.content,
+      timestamp: c.timestamp,
+      classification: c.classification,
+      metadata: c.metadata,
+    }));
+    log.info('Stream hybrid retrieval',
+      `vector=${retrievalResult.stats.vectorHits} keyword=${retrievalResult.stats.keywordHits} reranked=${retrievalResult.stats.afterRerank}`);
+  } catch (err: any) {
+    log.error('Stream hybrid retrieval failed, keyword fallback', err.message);
+    if (keywords.length > 0 || dateRange) {
+      candidates = searchByKeywords(keywords, cleanedMessages, streamContextLimits.candidateLimit, dateRange);
+    } else {
+      candidates = cleanedMessages.slice().sort((a, b) =>
+        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+      ).slice(0, streamContextLimits.candidateLimit).reverse();
+    }
   }
 
   // Load memory + detect intent
@@ -1407,20 +1591,27 @@ export async function chatStream(
   }
 
   const history = getHistory(sessionId);
-  const messageContext = buildMessageContext(candidates);
-  // Use streaming-optimised prompt (plain markdown output, no JSON wrapper)
-  const prompt = buildStreamingPrompt(userQuery, history.slice(0, -1), messageContext, candidates.length, totalMessages, streamMemSection);
+  const messageContext = buildMessageContext(candidates, streamContextLimits.contentMaxLen);
+  // Use streaming-optimised prompt (plain markdown output, no JSON wrapper) with token budget
+  const prompt = buildStreamingPrompt(
+    userQuery, history.slice(0, -1), messageContext,
+    candidates.length, totalMessages, streamMemSection,
+    streamContextLimits.tokenBudgetHint
+  );
 
-  // Try streaming with retry on failure
+  // Try streaming with improved fallback chain
   const STREAM_MAX_RETRIES = 2;
+  const STREAM_FALLBACK_CHAIN: ModelId[] = [
+    modelId,
+    modelId !== 'gemini-3-flash-preview' ? 'gemini-3-flash-preview' as ModelId : 'gemini-2.5-flash' as ModelId,
+    'gemini-2.5-flash' as ModelId,
+  ];
   let lastStreamError: Error | null = null;
 
   for (let attempt = 0; attempt <= STREAM_MAX_RETRIES; attempt++) {
     try {
-      const retryModelId = attempt > 0
-        ? (modelId === 'gemini-3.1-pro-preview' ? 'gemini-3-flash-preview' as ModelId : 'gemini-2.5-flash' as ModelId)
-        : modelId;
-      const activeModel = attempt > 0 ? (getModelInstance(retryModelId) || model) : model;
+      const retryModelId = STREAM_FALLBACK_CHAIN[Math.min(attempt, STREAM_FALLBACK_CHAIN.length - 1)];
+      const activeModel = getModelInstance(retryModelId) || model;
       if (attempt > 0) log.info('chatStream retry', `attempt=${attempt} model=${retryModelId}`);
 
       const result = await activeModel.generateContentStream(prompt);
@@ -1438,14 +1629,16 @@ export async function chatStream(
       // The streamed text is already plain markdown (no JSON wrapper to parse)
       const reply = fullText.trim();
 
-      // Match-based sources — find candidates whose sender/chat name appears in the reply
+      // Improved source matching — word-boundary aware to avoid false positives
       const replyLower = reply.toLowerCase();
       const seenIds = new Set<string>();
       const sources: ChatSource[] = candidates
         .filter(m => {
-          const s = (m.sender || '').toLowerCase();
-          const c = (m.chat_name || '').toLowerCase();
-          return (s.length > 2 && replyLower.includes(s)) || (c.length > 2 && replyLower.includes(c));
+          const s = (m.sender || '').toLowerCase().trim();
+          const c = (m.chat_name || '').toLowerCase().trim();
+          const sMatch = s.length > 2 && new RegExp(`\\b${s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(replyLower);
+          const cMatch = c.length > 2 && new RegExp(`\\b${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(replyLower);
+          return sMatch || cMatch;
         })
         .slice(0, 8)
         .map(m => buildSource(m, 'Mentioned in response'))
@@ -1459,7 +1652,7 @@ export async function chatStream(
       // Generate suggestions based on intent (no JSON parsing needed)
       const suggestions = generateSuggestions(userQuery, reply, streamIntent);
 
-      const usedModel = attempt > 0 ? retryModelId : modelId;
+      const usedModel = retryModelId;
       const assistantMsg: ChatMessage = {
         id: genId(),
         role: 'assistant',
@@ -1481,8 +1674,14 @@ export async function chatStream(
     } catch (err: any) {
       if (signal?.aborted) return;
       lastStreamError = err;
-      log.error('chatStream attempt failed', `attempt=${attempt} error=${err.message}`);
-      if (attempt < STREAM_MAX_RETRIES) continue; // retry with fallback model
+      const errMsg = err.message || '';
+      const isQuota = /quota|rate.?limit|429|resource.?exhausted/i.test(errMsg);
+      log.error('chatStream attempt failed', `attempt=${attempt} ${isQuota ? '[QUOTA] ' : ''}error=${errMsg}`);
+      if (attempt < STREAM_MAX_RETRIES) {
+        const delay = isQuota ? 3000 * (attempt + 1) : 1000;
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
     }
   }
 

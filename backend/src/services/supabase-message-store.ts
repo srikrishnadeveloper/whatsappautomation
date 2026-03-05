@@ -70,14 +70,14 @@ class SupabaseMessageStore {
     if (filters?.decision) countQuery = countQuery.eq('decision', filters.decision);
     if (filters?.priority) countQuery = countQuery.eq('priority', filters.priority);
     if (filters?.search) {
-      // Search individual keywords across content and sender (most relevant fields).
-      // Limit to 3 keywords to keep query parsing manageable for PostgREST.
-      // The in-memory searchByKeywords() later handles full multi-field ranking.
-      const searchTerms = filters.search.toLowerCase().split(/\s+/).filter((t: string) => t.length >= 2).slice(0, 3);
+      // Search individual keywords across content, sender, and chat_name.
+      // Support up to 6 keywords for broad coverage; in-memory re-rank does the rest.
+      const searchTerms = filters.search.toLowerCase().split(/\s+/).filter((t: string) => t.length >= 2).slice(0, 6);
       if (searchTerms.length > 0) {
         const orClauses = searchTerms.flatMap(term => [
           `content.ilike.%${term}%`,
           `sender.ilike.%${term}%`,
+          `chat_name.ilike.%${term}%`,
         ]).join(',');
         countQuery = countQuery.or(orClauses);
       }
@@ -97,11 +97,12 @@ class SupabaseMessageStore {
     if (filters?.decision) query = query.eq('decision', filters.decision);
     if (filters?.priority) query = query.eq('priority', filters.priority);
     if (filters?.search) {
-      const searchTerms = filters.search.toLowerCase().split(/\s+/).filter((t: string) => t.length >= 2).slice(0, 3);
+      const searchTerms = filters.search.toLowerCase().split(/\s+/).filter((t: string) => t.length >= 2).slice(0, 6);
       if (searchTerms.length > 0) {
         const orClauses = searchTerms.flatMap(term => [
           `content.ilike.%${term}%`,
           `sender.ilike.%${term}%`,
+          `chat_name.ilike.%${term}%`,
         ]).join(',');
         query = query.or(orClauses);
       }

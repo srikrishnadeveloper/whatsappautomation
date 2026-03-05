@@ -181,6 +181,19 @@ class HybridMessageStore {
           : message;
         const result = await this.supabaseStore.add(msgToStore, userId, jwt);
         console.log(`💾 Message SAVED to Supabase (ID: ${result.id}, User: ${userId}${isEncryptionEnabled() ? ', encrypted' : ''})`);
+
+        // Generate and store embedding (fire-and-forget, non-blocking)
+        try {
+          const { embedMessage } = require('./embedding-service');
+          embedMessage({
+            id: result.id,
+            sender: message.sender,
+            chat_name: message.chat_name,
+            content: message.content,
+            metadata: message.metadata,
+          }).catch(() => {});
+        } catch { /* embedding service not available */ }
+
         // Return with decrypted content so callers see plaintext
         return decryptMessage(result);
       } catch (error: any) {
